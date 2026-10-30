@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Local environments
+.venv/
+uv.lock
+
+# Runtime artifacts
+*.log
+.env
+.env.*

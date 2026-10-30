@@ -1,0 +1,18 @@
+[project]
+name = "agents-md-injector"
+version = "1.1.0"
+description = "Hermes Agent plugin that injects the nearest AGENTS.md into read_file results."
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+# importlib mode keeps pytest from importing the hyphenated plugin package by
+# directory name; tests load it through the same spec the Hermes loader uses.
+addopts = "--import-mode=importlib -p no:cacheprovider"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E9", "F", "W6"]
