@@ -283,6 +283,17 @@ def _core_should_skip(target_dir: Path, working_dir: Path) -> bool:
     return repo_root is not None and repo_root == working_dir.resolve()
 
 
+def _lexical_from(value: Any, base: Path) -> Optional[Path]:
+    """Join *value* onto *base* without resolving symlinks."""
+    try:
+        path = Path(os.fspath(value)).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        return path
+    except (TypeError, ValueError, OSError, RuntimeError):
+        return None
+
+
 def _resolve_from(value: Any, base: Path) -> Optional[Path]:
     try:
         text = os.fspath(value)
@@ -727,9 +738,9 @@ def _search_result_paths(result: Any, anchor: Path, working_dir: Path) -> List[P
     paths: List[Path] = []
     seen: Set[str] = set()
     for value in candidates:
-        path = _resolve_from(value, anchor)
+        path = _lexical_from(value, anchor)
         if path is None or not path.exists():
-            path = _resolve_from(value, working_dir)
+            path = _lexical_from(value, working_dir)
         if path is None or not path.exists():
             continue
         key = str(path)

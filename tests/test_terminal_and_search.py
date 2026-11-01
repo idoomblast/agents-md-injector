@@ -220,14 +220,28 @@ def test_sensitive_search_result_is_not_cached(injector, tmp_path):
     assert key not in injector._last_seen
 
 
-def test_out_of_tree_symlink_search_result_is_not_cached(injector, tmp_path):
+def test_out_of_tree_symlink_search_result_is_not_cached(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
-    outside = tmp_path / "outside.md"
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside = outside_dir / "AGENTS.md"
     outside.write_text("outside rules", encoding="utf-8")
     (repo / "AGENTS.md").unlink()
     (repo / "AGENTS.md").symlink_to(outside)
     result = json.dumps({"matches": [{"path": str(repo / "AGENTS.md")}]})
 
-    assert hook(injector, "search_files", {"path": str(repo)}, result) is None
-    assert injector._injected == {}
-    assert injector._last_seen == {}
+    reads = []
+    original = injector._read_text_limited
+
+    def spy(path, limit):
+        reads.append(str(path))
+        return original(path, limit)
+
+    monkeypatch.setattr(injector, "_read_text_limited", spy)
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is None or "outside rules" not in output
+    assert str(outside.resolve()) not in reads
+    key = str(outside.resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
