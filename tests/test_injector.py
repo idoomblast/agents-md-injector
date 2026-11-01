@@ -139,12 +139,14 @@ def test_relative_paths_resolve_against_terminal_cwd(injector, tmp_path, monkeyp
     repo = make_repo(tmp_path)
     write(repo / "AGENTS.md", "rules")
     write(repo / "src" / "app.py", "code")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("TERMINAL_CWD", str(repo))
+    monkeypatch.setenv("TERMINAL_CWD", str(session_dir))
 
     out = injector._on_transform_tool_result(
         tool_name="read_file",
-        args={"path": "src/app.py"},
+        args={"path": "../repo/src/app.py"},
         result="FILE CONTENT",
         session_id="s1",
     )
@@ -263,14 +265,28 @@ def test_disable_flag(injector, tmp_path, monkeypatch):
     assert read(injector, target) is None
 
 
-def test_other_tools_are_ignored(injector, tmp_path):
+def test_terminal_without_read_commands_is_ignored(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    write(repo / "AGENTS.md", "rules")
+
+    out = injector._on_transform_tool_result(
+        tool_name="terminal",
+        args={"command": "ls -la"},
+        result="output",
+        session_id="s1",
+    )
+
+    assert out is None
+
+
+def test_unknown_tools_are_ignored(injector, tmp_path):
     repo = make_repo(tmp_path)
     write(repo / "AGENTS.md", "rules")
     write(repo / "app.py", "code")
 
     out = injector._on_transform_tool_result(
-        tool_name="terminal",
-        args={"command": "ls"},
+        tool_name="other_tool",
+        args={"path": str(repo / "app.py")},
         result="output",
         session_id="s1",
     )

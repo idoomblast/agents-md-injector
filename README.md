@@ -1,16 +1,17 @@
 # agents-md-injector
 
 A small [Hermes Agent](https://hermes-agent.nousresearch.com/docs) plugin that injects the
-nearest `AGENTS.md` into `read_file` tool results — dynamically, per file path, and only once
-per session.
+nearest `AGENTS.md` into `read_file`, `search_files`, and file-reading `terminal` results —
+dynamically, per target path, and only once per session.
 
 Hermes already accepts repo-level agent instructions, but dumping every `AGENTS.md` a
 monorepo contains into the system prompt burns tokens on rules for directories the agent may
 never touch. This plugin loads instructions **when and where they become relevant**: the moment
-the agent reads a file, the instruction files above that file are appended to the result.
+when the agent reads or searches files, the instruction files above those targets are appended to
+the result.
 
 ```
-read_file("app/Models/Downloaded.php")
+terminal("head -n 40 app/Models/Downloaded.php")
         │
         ▼
   tool result (unchanged)
@@ -23,10 +24,10 @@ read_file("app/Models/Downloaded.php")
         └── append "Instructions from: …" blocks
         │
         ▼
-  model sees the file + the rules for that part of the tree
+  model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.1.0 · **Tests:** 26 · **License:** MIT
+**Version:** 1.2.0 · **Tests:** 65 · **License:** MIT
 
 ---
 
@@ -78,7 +79,9 @@ per-service, or in `~/.hermes/.env`. No config schema, no restart needed to chan
 | `AGENTS_MD_INJECTOR_DISABLE` | *(unset)* | `1`/`true`/`yes`/`on` disables injection entirely |
 | `AGENTS_MD_INJECTOR_FILENAMES` | `AGENTS.md,agents.md` | Comma-separated instruction filenames, checked in order per directory |
 | `AGENTS_MD_INJECTOR_MAX_BYTES` | `32768` | Per-file byte cap before truncation; `0` = unlimited |
-| `AGENTS_MD_INJECTOR_MAX_TOTAL_BYTES` | `65536` | Total bytes appended per read; `0` = unlimited |
+| `AGENTS_MD_INJECTOR_MAX_TOTAL_BYTES` | `65536` | Total bytes appended per tool result; `0` = unlimited |
+| `AGENTS_MD_INJECTOR_MAX_TERMINAL_TARGETS` | `8` | Maximum distinct existing paths classified from one terminal command |
+| `AGENTS_MD_INJECTOR_MAX_SEARCH_DIRS` | `5` | Maximum distinct result directories refined from `search_files`; `0` disables refinement |
 
 Examples:
 
@@ -99,11 +102,14 @@ content was cut:
 
 ## Behavior
 
-1. **Only `read_file`.** Every other tool result passes through untouched.
+1. **File-oriented tools.** `read_file` uses its target file; `terminal` statically classifies
+   common read/search commands; `search_files` uses result paths when available and falls back to
+   the requested search path. Other tool results pass through untouched.
 2. **Gateway-safe path resolution.** Relative paths resolve against `TERMINAL_CWD`, then
    `os.getcwd()`. Gateway workers run with the daemon home as cwd, so resolving against
    `os.getcwd()` alone would look in the wrong tree.
-3. **Walk up to the repository root.** Starting at the read file's directory and moving up,
+3. **Walk up to the repository root.** Starting at each file's parent or directory target and
+   moving up,
    the walk stops *after* processing the first directory that contains `.git` (directory or
    worktree file). Files outside any repository walk to the filesystem root — put a global
    `AGENTS.md` in `$HOME` and it applies everywhere.
@@ -118,19 +124,18 @@ content was cut:
 8. **Size-capped.** Per-file and total caps apply *before* anything is appended, so one
    runaway `AGENTS.md` cannot flood the context window.
 
-### Known interaction: core session-start injection
+### Coordination with Hermes core hints
 
-Hermes core already loads `AGENTS.md` from the session cwd upward into the system prompt.
-This plugin is intentionally path-driven on top of that: the repo-root file may therefore
-appear twice (once at session start, once on the first read inside that repo) unless the
-core loader has already been disabled. That duplication is bounded by rule 5 — it happens at
-most once per file per session.
+When Hermes core subdirectory hints are active, targets inside the terminal working directory
+are skipped because core already appends their instructions. Targets outside that directory are
+still eligible. `read_file` keeps its original behavior. Core hints are disabled by Hermes in
+home-like working directories, so this plugin continues to provide the context there.
 
 ### One hook wins
 
 `transform_tool_result` is a string-replacing hook and Hermes uses the **first non-`None`
-string returned by any plugin**. If another enabled plugin also transforms `read_file`
-results, only one of them takes effect. Disable the other plugin (or extend this one) rather
+string returned by any plugin**. If another enabled plugin also transforms these tool results,
+only one of them takes effect. Disable the other plugin (or extend this one) rather
 than expecting the outputs to merge.
 
 ## Development
@@ -191,15 +196,19 @@ agents-md-injector/
 ├── .github/workflows/   # CI: ruff + pytest on Python 3.9 / 3.12
 ├── tests/
 │   ├── conftest.py      # loads the plugin like the Hermes loader
-│   └── test_injector.py # behavior, dedupe, caps, path boundaries
+│   ├── test_injector.py # read_file behavior, dedupe, caps, path boundaries
+│   ├── test_command_targets.py # terminal shell classifier
+│   └── test_terminal_and_search.py # terminal/search_files integration
 ├── README.md
 └── LICENSE
 ```
 
 ## Limitations
 
-- Only `read_file` results are inspected. Content pulled in through `terminal`, `grep`, or a
-  subagent prompt does not trigger injection.
+- Terminal classification is static and best-effort: unsupported commands, shell loops,
+  `xargs`, and paths constructed through variables are not resolved.
+- `search_files` result refinement depends on recognizable paths in its JSON metadata/text;
+  otherwise the requested search path is used as the anchor.
 - Only the filenames in `AGENTS_MD_INJECTOR_FILENAMES` are recognized; `CLAUDE.md` and other
   conventions require opting in through that variable.
 - Injection state is in-process memory. A gateway restart or plugin reload clears it, and the

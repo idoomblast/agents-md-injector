@@ -1,7 +1,7 @@
 [project]
 name = "agents-md-injector"
-version = "1.1.0"
-description = "Hermes Agent plugin that injects the nearest AGENTS.md into read_file results."
+version = "1.2.0"
+description = "Hermes Agent plugin that injects the nearest AGENTS.md into file-oriented tool results."
 requires-python = ">=3.9"
 
 [tool.pytest.ini_options]

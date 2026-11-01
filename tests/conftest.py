@@ -43,6 +43,8 @@ def injector(monkeypatch):
         module.FILENAMES_ENV,
         module.MAX_FILE_ENV,
         module.MAX_TOTAL_ENV,
+        module.MAX_TERMINAL_TARGETS_ENV,
+        module.MAX_SEARCH_DIRS_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
@@ -52,4 +54,6 @@ def injector(monkeypatch):
         yield module
     finally:
         module.reset_cache()
-        sys.modules.pop(PACKAGE_NAME, None)
+        for name in list(sys.modules):
+            if name == PACKAGE_NAME or name.startswith(PACKAGE_NAME + "."):
+                sys.modules.pop(name, None)

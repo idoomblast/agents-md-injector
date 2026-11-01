@@ -1,7 +1,7 @@
-"""AGENTS.md Injector — inject the nearest AGENTS.md into ``read_file`` results.
+"""AGENTS.md Injector — add relevant agent instructions to file-oriented results.
 
-Hermes plugin that hooks ``transform_tool_result``. When the agent reads a file,
-the plugin walks up from that file's directory to the repository root (the first
+Hermes plugin that hooks ``transform_tool_result``. When the agent reads or searches
+files, the plugin walks up from each target to the repository root (the first
 directory containing ``.git``) and appends every not-yet-injected ``AGENTS.md``
 it finds to the tool result.
 
@@ -19,10 +19,14 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Set, Tuple
+
+if __package__:
+    from .command_targets import extract_terminal_targets
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,10 @@ DISABLE_ENV = "AGENTS_MD_INJECTOR_DISABLE"
 FILENAMES_ENV = "AGENTS_MD_INJECTOR_FILENAMES"
 MAX_FILE_ENV = "AGENTS_MD_INJECTOR_MAX_BYTES"
 MAX_TOTAL_ENV = "AGENTS_MD_INJECTOR_MAX_TOTAL_BYTES"
+MAX_TERMINAL_TARGETS_ENV = "AGENTS_MD_INJECTOR_MAX_TERMINAL_TARGETS"
+MAX_SEARCH_DIRS_ENV = "AGENTS_MD_INJECTOR_MAX_SEARCH_DIRS"
+DEFAULT_MAX_TERMINAL_TARGETS = 8
+DEFAULT_MAX_SEARCH_DIRS = 5
 
 # Session key -> canonical paths already injected in that session.
 _injected: dict[str, Set[str]] = {}
@@ -63,6 +71,19 @@ def _env_bytes(name: str, default: int) -> int:
         logger.debug("Ignoring invalid %s=%r (expected integer)", name, raw)
         return default
     return value if value > 0 else 0
+
+
+def _env_count(name: str, default: int) -> int:
+    """Read a positive count, using *default* for blank or invalid values."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+        return value if value >= 0 else default
+    except ValueError:
+        logger.debug("Ignoring invalid %s=%r (expected integer)", name, raw)
+        return default
 
 
 def _configured_filenames() -> Tuple[str, ...]:
@@ -128,6 +149,61 @@ def resolve_read_path(filepath: str) -> Optional[Path]:
         return None
 
 
+def _working_dir() -> Path:
+    """Resolve the session terminal cwd used for relative paths and core gating."""
+    base = Path(os.environ.get("TERMINAL_CWD") or os.getcwd()).expanduser()
+    return base.resolve()
+
+
+def core_hints_active(working_dir: Path) -> bool:
+    """Mirror Hermes core's home-like cwd check for subdirectory hints."""
+    home = Path.home().resolve()
+    resolved = working_dir.resolve()
+    if resolved == home or resolved in {Path("/home"), Path("/root"), Path("/workspace")}:
+        return False
+    if resolved.parent in {Path("/home"), Path("/root")}:
+        return False
+    return not any(part in {".home", "host-home", "host_home"} for part in resolved.parts)
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _core_should_skip(target_dir: Path, working_dir: Path) -> bool:
+    return core_hints_active(working_dir) and _is_inside(target_dir, working_dir)
+
+
+def _resolve_from(value: Any, base: Path) -> Optional[Path]:
+    try:
+        text = os.fspath(value)
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        return path.resolve()
+    except (TypeError, ValueError, OSError, RuntimeError):
+        return None
+
+
+def _json_metadata(result: Any) -> Any:
+    """Parse a JSON tool result, including the escaped representation from text wrappers."""
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, str):
+        return None
+    try:
+        return json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        try:
+            return json.loads(result.replace("\\n", "\n"))
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+
 def find_git_root(start: Path) -> Optional[Path]:
     """Walk up from *start* and return the first directory containing ``.git``.
 
@@ -164,6 +240,7 @@ def collect_instruction_chunks(
     filenames: Optional[Sequence[str]] = None,
     max_file_bytes: Optional[int] = None,
     max_total_bytes: Optional[int] = None,
+    start_at_directory: bool = False,
 ) -> List[str]:
     """Collect "Instructions from: <path>" chunks for *path*.
 
@@ -186,7 +263,7 @@ def collect_instruction_chunks(
     chunks: List[str] = []
     used = 0
 
-    start = path.parent
+    start = path if start_at_directory else path.parent
     if not start.exists():
         return chunks
 
@@ -208,7 +285,7 @@ def collect_instruction_chunks(
 
             # Reading the instruction file itself: its content is already the
             # tool result, so mark it seen and move on.
-            if resolved == path:
+            if resolved == path.resolve():
                 cache.add(key)
                 continue
 
@@ -256,32 +333,100 @@ def _on_transform_tool_result(
     result: Any = None,
     **kwargs: Any,
 ) -> Optional[str]:
-    """Append not-yet-injected AGENTS.md context to a ``read_file`` result.
+    """Append not-yet-injected AGENTS.md context to file-oriented tool results.
 
     Returns ``None`` (result unchanged) whenever there is nothing to inject or
     anything goes wrong.
     """
-    if tool_name != "read_file" or not isinstance(args, dict):
+    if tool_name not in {"read_file", "search_files", "terminal"} or not isinstance(args, dict):
         return None
     if _env_flag(DISABLE_ENV):
         return None
 
-    filepath = args.get("path")
-    if not isinstance(filepath, str):
-        try:
-            filepath = os.fspath(filepath)  # type: ignore[arg-type]
-        except TypeError:
-            return None
-    if not filepath.strip():
-        return None
-
     try:
-        path = resolve_read_path(filepath)
-        if path is None or not path.parent.exists():
-            return None
-        chunks = collect_instruction_chunks(path, session_key=_session_key(kwargs))
+        working_dir = _working_dir()
+        session_key = _session_key(kwargs)
+        targets: List[Tuple[Path, bool]] = []
+
+        if tool_name == "read_file":
+            filepath = args.get("path")
+            if not isinstance(filepath, str):
+                try:
+                    filepath = os.fspath(filepath)  # type: ignore[arg-type]
+                except TypeError:
+                    return None
+            if not filepath.strip():
+                return None
+            path = resolve_read_path(filepath)
+            if path is None or not path.parent.exists():
+                return None
+            targets.append((path, False))
+
+        elif tool_name == "terminal":
+            command = args.get("command")
+            if not isinstance(command, str) or not command.strip():
+                return None
+            result_data = _json_metadata(result)
+            result_cwd = result_data.get("cwd") if isinstance(result_data, dict) else None
+            found = extract_terminal_targets(
+                command,
+                working_dir,
+                workdir=os.fspath(args["workdir"]) if args.get("workdir") else None,
+                result_cwd=result_cwd,
+                max_targets=_env_count(MAX_TERMINAL_TARGETS_ENV, DEFAULT_MAX_TERMINAL_TARGETS),
+            )
+            for path in found:
+                targets.append((path, path.is_dir()))
+
+        else:
+            anchor_value = args.get("path", ".")
+            anchor = _resolve_from(anchor_value, working_dir)
+            if anchor is None:
+                anchor = working_dir
+            if anchor.is_file():
+                anchor = anchor.parent
+            if not anchor.is_dir():
+                return None
+            refined = _search_result_directories(
+                result,
+                anchor,
+                working_dir,
+                _env_count(MAX_SEARCH_DIRS_ENV, DEFAULT_MAX_SEARCH_DIRS),
+            )
+            targets.extend((directory, True) for directory in refined)
+        chunks: List[str] = []
+        if tool_name == "search_files":
+            for path in _search_result_paths(result, anchor, working_dir):
+                if path.name in _configured_filenames() and not _core_should_skip(
+                    path.parent, working_dir
+                ):
+                    _session_cache(session_key).add(str(path.resolve()))
+        total_budget = _env_bytes(MAX_TOTAL_ENV, DEFAULT_MAX_TOTAL_BYTES)
+        total_used = 0
+        for path, is_directory in targets:
+            target_dir = path if is_directory else path.parent
+            if _core_should_skip(target_dir, working_dir):
+                continue
+            if not target_dir.exists():
+                continue
+            if total_budget and total_used >= total_budget:
+                break
+            new_chunks = collect_instruction_chunks(
+                path,
+                session_key=session_key,
+                start_at_directory=is_directory,
+                max_total_bytes=(total_budget - total_used) if total_budget else None,
+            )
+            chunks.extend(new_chunks)
+            total_used += sum(
+                len(chunk.split("\n", 1)[1].encode("utf-8"))
+                for chunk in new_chunks
+                if "\n" in chunk
+            )
+            if not is_directory and path.name in _configured_filenames():
+                _session_cache(session_key).add(str(path.resolve()))
     except Exception as exc:  # never break a tool call because of this plugin
-        logger.debug("agents-md-injector failed for %r: %s", filepath, exc)
+        logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
         return None
 
     if not chunks:
@@ -289,6 +434,77 @@ def _on_transform_tool_result(
 
     separator = "\n\n---\n\n"
     return f"{result}{separator}{separator.join(chunks)}"
+
+
+def _search_result_directories(
+    result: Any,
+    anchor: Path,
+    working_dir: Path,
+    limit: int,
+) -> List[Path]:
+    """Best-effort extraction of match parents, falling back to the search anchor."""
+    if limit == 0:
+        return [anchor]
+    data = _json_metadata(result)
+    if not isinstance(data, dict):
+        return [anchor]
+
+    paths = _search_result_paths(result, anchor, working_dir)
+    directories: List[Path] = []
+    seen: Set[str] = set()
+    for path in paths:
+        directory = path if path.is_dir() else path.parent
+        key = str(directory)
+        if key not in seen:
+            seen.add(key)
+            directories.append(directory)
+            if len(directories) >= limit:
+                break
+    return directories or [anchor]
+
+
+def _search_result_paths(result: Any, anchor: Path, working_dir: Path) -> List[Path]:
+    """Resolve existing paths exposed by search_files result metadata."""
+    data = _json_metadata(result)
+    if not isinstance(data, dict):
+        return []
+
+    candidates: List[str] = []
+    matches = data.get("matches")
+    if isinstance(matches, list):
+        for match in matches:
+            if isinstance(match, dict) and isinstance(match.get("path"), str):
+                candidates.append(match["path"])
+
+    matches_text = data.get("matches_text")
+    if isinstance(matches_text, str):
+        for line in matches_text.splitlines():
+            if line and not line[0].isspace():
+                candidates.append(line)
+                parts = line.split(":")
+                candidates.extend(":".join(parts[:index]) for index in range(1, len(parts)))
+
+    files = data.get("files")
+    if isinstance(files, list):
+        candidates.extend(value for value in files if isinstance(value, str))
+
+    counts = data.get("counts")
+    if isinstance(counts, dict):
+        candidates.extend(key for key in counts if isinstance(key, str))
+
+    paths: List[Path] = []
+    seen: Set[str] = set()
+    for value in candidates:
+        path = _resolve_from(value, anchor)
+        if path is None or not path.exists():
+            path = _resolve_from(value, working_dir)
+        if path is None or not path.exists():
+            continue
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            paths.append(path)
+    return paths
 
 
 # ── Registration ──────────────────────────────────────────────────────────────
