@@ -202,3 +202,32 @@ def test_empty_search_result_does_not_mark_seen(injector, tmp_path):
         injector, "read_file", {"path": str(repo / "src" / "app.py")}, "file"
     )
     assert output is not None and "later rules" in output
+
+
+def test_sensitive_search_result_is_not_cached(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    sensitive_dir = repo / ".ssh"
+    sensitive_dir.mkdir()
+    sensitive = sensitive_dir / "AGENTS.md"
+    sensitive.write_text("SECRET KEY MATERIAL", encoding="utf-8")
+    result = json.dumps({"matches": [{"path": str(sensitive)}]})
+
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is None or "SECRET KEY MATERIAL" not in output
+    key = str(sensitive.resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
+
+
+def test_out_of_tree_symlink_search_result_is_not_cached(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside rules", encoding="utf-8")
+    (repo / "AGENTS.md").unlink()
+    (repo / "AGENTS.md").symlink_to(outside)
+    result = json.dumps({"matches": [{"path": str(repo / "AGENTS.md")}]})
+
+    assert hook(injector, "search_files", {"path": str(repo)}, result) is None
+    assert injector._injected == {}
+    assert injector._last_seen == {}
