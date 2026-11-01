@@ -121,7 +121,7 @@ def test_symlinked_sensitive_file_inside_repo_is_blocked_without_core_guard(
     assert output is None
 
 
-@pytest.mark.parametrize("name", ["id_custom", "secrets.toml"])
+@pytest.mark.parametrize("name", ["id_custom", "secrets.toml", ".envrc"])
 def test_sensitive_prefixes_blocked_without_core_guard(injector, tmp_path, monkeypatch, name):
     repo = make_repo(tmp_path)
     secret = repo / name
@@ -138,8 +138,8 @@ def test_sensitive_prefixes_blocked_without_core_guard(injector, tmp_path, monke
 
 def test_sensitive_prefix_blocked_when_core_guard_raises(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
-    secret = repo / "secrets.toml"
-    secret.write_text("top secret", encoding="utf-8")
+    secret = repo / ".envrc"
+    secret.write_text("export TOKEN=top-secret", encoding="utf-8")
     (repo / "AGENTS.md").unlink()
     os.symlink(secret, repo / "AGENTS.md")
 
@@ -209,6 +209,7 @@ def test_dash_heredoc_terminator_strips_tabs_only(injector, tmp_path):
 
 def test_cache_returns_to_bound_after_deactivation(injector, monkeypatch):
     monkeypatch.setattr(injector, "MAX_TRACKED_SESSIONS", 2)
+    monkeypatch.setattr(injector, "SESSION_IDLE_TTL", 0)
     injector.reset_cache()
     for key in ("s1", "s2", "s3"):
         injector._activate(key)
@@ -219,3 +220,42 @@ def test_cache_returns_to_bound_after_deactivation(injector, monkeypatch):
         injector._deactivate(key)
 
     assert len(injector._injected) <= 2
+
+
+def test_recent_session_keeps_dedupe_under_pressure(injector, monkeypatch):
+    monkeypatch.setattr(injector, "MAX_TRACKED_SESSIONS", 2)
+    injector.reset_cache()
+    cache = injector._session_cache("s1")
+    assert injector._reserve(cache, "k")
+
+    injector._activate("s1")
+    injector._deactivate("s1")
+    injector._activate("s2")
+    injector._session_cache("s2")
+    injector._activate("s3")
+    injector._session_cache("s3")
+
+    assert injector._session_cache("s1") is cache
+    assert injector._reserve(cache, "k") is False
+
+    injector._deactivate("s2")
+    injector._deactivate("s3")
+
+
+def test_mixed_quoted_heredoc_delimiter(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    command = 'cat <<E"OF"\nEOF\ncat plugin.yaml'
+
+    targets = injector.extract_terminal_targets(command, repo)
+
+    assert [path.name for path in targets] == ["plugin.yaml"]
+
+
+def test_spaced_dash_heredoc_does_not_target_the_delimiter(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "EOF").write_text("delimiter", encoding="utf-8")
+    command = "cat <<- EOF\n\tEOF\ncat plugin.yaml"
+
+    targets = injector.extract_terminal_targets(command, repo)
+
+    assert [path.name for path in targets] == ["plugin.yaml"]

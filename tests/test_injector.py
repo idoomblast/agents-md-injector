@@ -125,6 +125,7 @@ def test_reset_cache_reenables_injection(injector, tmp_path):
 
 def test_session_cache_is_bounded(injector, monkeypatch):
     monkeypatch.setattr(injector, "MAX_TRACKED_SESSIONS", 2)
+    monkeypatch.setattr(injector, "SESSION_IDLE_TTL", 0)
     for session in ("a", "b", "c"):
         injector._session_cache(session)
 

@@ -57,23 +57,31 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
             if cursor >= len(line):
                 index = cursor
                 continue
-            if line[cursor] in {"'", '"'}:
-                closing = line.find(line[cursor], cursor + 1)
-                if closing == -1:
-                    index = cursor + 1
+            parts: List[str] = []
+            while cursor < len(line):
+                current = line[cursor]
+                if current.isspace() or current in ";|&<>()":
+                    break
+                if current in {"'", '"'}:
+                    closing = line.find(current, cursor + 1)
+                    if closing == -1:
+                        parts.append(line[cursor + 1:])
+                        cursor = len(line)
+                        break
+                    parts.append(line[cursor + 1:closing])
+                    cursor = closing + 1
                     continue
-                delimiters.append((line[cursor + 1:closing], strip_tabs))
-                index = closing + 1
-                continue
-            start = cursor
-            while (
-                cursor < len(line)
-                and not line[cursor].isspace()
-                and line[cursor] not in ";|&<>()"
-            ):
+                if current == "\\":
+                    if cursor + 1 < len(line):
+                        parts.append(line[cursor + 1])
+                        cursor += 2
+                        continue
+                    cursor += 1
+                    continue
+                parts.append(current)
                 cursor += 1
-            if cursor > start:
-                delimiters.append((line[start:cursor].replace("\\", ""), strip_tabs))
+            if parts:
+                delimiters.append(("".join(parts), strip_tabs))
             index = cursor
             continue
         index += 1
@@ -179,6 +187,10 @@ def _strip_redirections(tokens: Sequence[str]) -> Tuple[List[str], List[str]]:
             index += 2
             continue
         if token in {"<", "<<", "<<-"}:
+            if token == "<<" and index + 1 < len(tokens) and tokens[index + 1] == "-":
+                # The punctuation lexer splits `<<-` into `<<` and `-`.
+                index += 3 if index + 2 < len(tokens) else 2
+                continue
             if index + 1 < len(tokens):
                 if token == "<":
                     inputs.append(tokens[index + 1])

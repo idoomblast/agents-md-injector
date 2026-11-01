@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.3 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.4 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -117,8 +117,9 @@ content was cut:
    reads local rules before global rules.
 5. **Once per session.** Each instruction file is injected at most once per Hermes session
    (`session_id`, falling back to `task_id`). Parallel gateway sessions each get their own
-   copy; the tracked-session map is bounded and evicts the oldest session. The check-and-claim
-   is atomic, so concurrent tool calls cannot inject the same file twice.
+   copy; the tracked-session map is bounded and evicts only sessions idle beyond its TTL, so
+   a recent session keeps its dedupe state under cache pressure. The check-and-claim is
+   atomic, so concurrent tool calls cannot inject the same file twice.
 6. **Reading `AGENTS.md` itself injects nothing.** The content is already the tool result.
 7. **Fail open.** A missing directory, unreadable file, decode error, or unexpected bug
    returns `None` — the tool result is never broken by this plugin.

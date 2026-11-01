@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Set, Tuple
 
@@ -35,6 +36,9 @@ DEFAULT_FILENAMES: Tuple[str, ...] = ("AGENTS.md", "agents.md")
 DEFAULT_MAX_FILE_BYTES = 32 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 64 * 1024
 MAX_TRACKED_SESSIONS = 64
+# A session idle for less than this keeps its dedupe state even when the map is
+# over its bound; only genuinely stale sessions are evicted.
+SESSION_IDLE_TTL = 900.0
 
 DISABLE_ENV = "AGENTS_MD_INJECTOR_DISABLE"
 FILENAMES_ENV = "AGENTS_MD_INJECTOR_FILENAMES"
@@ -50,6 +54,7 @@ _injected: dict[str, Set[str]] = {}
 _injected_lock = threading.Lock()
 # Sessions with a transform in flight; their cache must not be evicted.
 _active_sessions: dict[str, int] = {}
+_last_seen: dict[str, float] = {}
 
 
 # ── Configuration helpers ─────────────────────────────────────────────────────
@@ -113,16 +118,23 @@ def _session_key(kwargs: dict) -> str:
     return str(kwargs.get("session_id") or kwargs.get("task_id") or "")
 
 
-def _trim_locked() -> None:
-    """Evict inactive sessions until the map is within ``MAX_TRACKED_SESSIONS``."""
+def _trim_locked(now: Optional[float] = None) -> None:
+    """Evict stale inactive sessions until the map is within its bound."""
+    current = time.monotonic() if now is None else now
     while len(_injected) > MAX_TRACKED_SESSIONS:
         victim = next(
-            (key for key in _injected if _active_sessions.get(key, 0) == 0),
+            (
+                key
+                for key in _injected
+                if _active_sessions.get(key, 0) == 0
+                and current - _last_seen.get(key, 0.0) >= SESSION_IDLE_TTL
+            ),
             None,
         )
         if victim is None:
             return
         del _injected[victim]
+        _last_seen.pop(victim, None)
 
 
 def _session_cache(session_key: str) -> Set[str]:
@@ -132,17 +144,24 @@ def _session_cache(session_key: str) -> Set[str]:
         cache = _injected.get(session_key)
         if cache is None:
             if len(_injected) >= MAX_TRACKED_SESSIONS:
+                now = time.monotonic()
                 for victim in list(_injected):
-                    if _active_sessions.get(victim, 0) == 0:
+                    if (
+                        _active_sessions.get(victim, 0) == 0
+                        and now - _last_seen.get(victim, 0.0) >= SESSION_IDLE_TTL
+                    ):
                         del _injected[victim]
+                        _last_seen.pop(victim, None)
                         break
             cache = _injected[session_key] = set()
+        _last_seen[session_key] = time.monotonic()
         return cache
 
 
 def _activate(session_key: str) -> None:
     with _injected_lock:
         _active_sessions[session_key] = _active_sessions.get(session_key, 0) + 1
+        _last_seen[session_key] = time.monotonic()
 
 
 def _deactivate(session_key: str) -> None:
@@ -152,6 +171,7 @@ def _deactivate(session_key: str) -> None:
             _active_sessions[session_key] = remaining
         else:
             _active_sessions.pop(session_key, None)
+        _last_seen[session_key] = time.monotonic()
         _trim_locked()
 
 
@@ -182,8 +202,10 @@ def reset_cache(session_key: Optional[str] = None) -> None:
         if session_key is None:
             _injected.clear()
             _active_sessions.clear()
+            _last_seen.clear()
         else:
             _injected.pop(session_key, None)
+            _last_seen.pop(session_key, None)
 
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -323,7 +345,7 @@ _SENSITIVE_DIRS = {".aws", ".gnupg", ".kube", ".ssh"}
 def _looks_sensitive(path: Path) -> bool:
     """Name-based deny list that works even when the core guard is unavailable."""
     name = path.name.lower()
-    if name == ".env" or name.startswith(".env."):
+    if name.startswith(".env"):
         return True
     if name.startswith("id_") or name.startswith("secrets."):
         return True
