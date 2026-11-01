@@ -1,8 +1,12 @@
 """Regression tests for the v1.2.1 acceptance-gate findings."""
 
 import os
+import sys
 import threading
+import types
 from pathlib import Path
+
+import pytest
 
 
 def make_repo(root):
@@ -103,8 +107,6 @@ def test_reserve_claims_a_key_once_under_concurrency(injector):
 def test_symlinked_sensitive_file_inside_repo_is_blocked_without_core_guard(
     injector, tmp_path, monkeypatch
 ):
-    import sys
-
     repo = make_repo(tmp_path)
     secret = repo / ".env"
     secret.write_text("API_KEY=super-secret", encoding="utf-8")
@@ -112,6 +114,46 @@ def test_symlinked_sensitive_file_inside_repo_is_blocked_without_core_guard(
     os.symlink(secret, repo / "AGENTS.md")
     # Simulate a host where the core read guard cannot be imported.
     monkeypatch.setitem(sys.modules, "agent.file_safety", None)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "raw")
+
+    assert output is None
+
+
+@pytest.mark.parametrize("name", ["id_custom", "secrets.toml"])
+def test_sensitive_prefixes_blocked_without_core_guard(injector, tmp_path, monkeypatch, name):
+    repo = make_repo(tmp_path)
+    secret = repo / name
+    secret.write_text("top secret", encoding="utf-8")
+    (repo / "AGENTS.md").unlink()
+    os.symlink(secret, repo / "AGENTS.md")
+    monkeypatch.setitem(sys.modules, "agent.file_safety", None)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "raw")
+
+    assert output is None
+
+
+def test_sensitive_prefix_blocked_when_core_guard_raises(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    secret = repo / "secrets.toml"
+    secret.write_text("top secret", encoding="utf-8")
+    (repo / "AGENTS.md").unlink()
+    os.symlink(secret, repo / "AGENTS.md")
+
+    agent = types.ModuleType("agent")
+    agent.__path__ = []  # type: ignore[attr-defined]
+    safety = types.ModuleType("agent.file_safety")
+
+    def boom(_path):
+        raise RuntimeError("guard down")
+
+    safety.get_read_block_error = boom
+    agent.file_safety = safety  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.file_safety", safety)
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
 
     output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "raw")
@@ -146,3 +188,34 @@ def test_active_session_cache_is_not_evicted(injector):
         assert "s1" in injector._injected
     finally:
         injector._deactivate("s1")
+
+
+def test_quoted_heredoc_filename_still_a_target(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    odd = repo / "<<EOF"
+    odd.write_text("literal", encoding="utf-8")
+
+    targets = injector.extract_terminal_targets("cat '<<EOF'", repo)
+
+    assert targets == [odd.resolve()]
+
+
+def test_dash_heredoc_terminator_strips_tabs_only(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    command = "cat <<-EOF\n EOF\ncat plugin.yaml\n\tEOF"
+
+    assert injector.extract_terminal_targets(command, repo) == []
+
+
+def test_cache_returns_to_bound_after_deactivation(injector, monkeypatch):
+    monkeypatch.setattr(injector, "MAX_TRACKED_SESSIONS", 2)
+    injector.reset_cache()
+    for key in ("s1", "s2", "s3"):
+        injector._activate(key)
+        injector._session_cache(key)
+    assert len(injector._injected) == 3
+
+    for key in ("s1", "s2", "s3"):
+        injector._deactivate(key)
+
+    assert len(injector._injected) <= 2

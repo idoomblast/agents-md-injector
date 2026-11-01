@@ -7,7 +7,6 @@ classifier for common read/search commands, not a general shell interpreter.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -23,26 +22,12 @@ SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
 WRAPPERS = {"sudo", "env", "time", "nice", "ionice", "timeout", "command", "builtin", "exec", "nohup"}
 
 # Heredoc markers: <<EOF, <<-EOF, <<'EOF', <<"EOF", and several per line.
-_QUOTED_HEREDOC_RE = re.compile(
-    r"(?P<quote>['\"])(?P<marker><<-?[A-Za-z_][A-Za-z0-9_]*)(?P=quote)"
-)
+def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
+    """Return ``(delimiter, strip_tabs)`` for each heredoc on *line*.
 
-
-def _neutralize_quoted_heredocs(line: str) -> str:
-    """Neuter quoted ``'<<EOF'`` tokens so the tokenizer keeps them as operands.
-
-    shlex drops quote information, so a quoted pattern such as ``grep '<<EOF'
-    file`` would otherwise look like an input redirection and swallow ``file``.
+    Markers inside quotes are literals, not heredocs.
     """
-    return _QUOTED_HEREDOC_RE.sub(
-        lambda match: f"{match.group('quote')}q{match.group('marker')}{match.group('quote')}",
-        line,
-    )
-
-
-def _heredoc_delimiters(line: str) -> List[str]:
-    """Return heredoc delimiters on *line*, ignoring markers inside quotes."""
-    delimiters: List[str] = []
+    delimiters: List[Tuple[str, bool]] = []
     index = 0
     quote = ""
     while index < len(line):
@@ -64,7 +49,8 @@ def _heredoc_delimiters(line: str) -> List[str]:
             continue
         if char == "<" and line.startswith("<<", index) and not line.startswith("<<<", index):
             cursor = index + 2
-            if cursor < len(line) and line[cursor] == "-":
+            strip_tabs = cursor < len(line) and line[cursor] == "-"
+            if strip_tabs:
                 cursor += 1
             while cursor < len(line) and line[cursor] in " \t":
                 cursor += 1
@@ -76,7 +62,7 @@ def _heredoc_delimiters(line: str) -> List[str]:
                 if closing == -1:
                     index = cursor + 1
                     continue
-                delimiters.append(line[cursor + 1:closing])
+                delimiters.append((line[cursor + 1:closing], strip_tabs))
                 index = closing + 1
                 continue
             start = cursor
@@ -87,11 +73,17 @@ def _heredoc_delimiters(line: str) -> List[str]:
             ):
                 cursor += 1
             if cursor > start:
-                delimiters.append(line[start:cursor].replace("\\", ""))
+                delimiters.append((line[start:cursor].replace("\\", ""), strip_tabs))
             index = cursor
             continue
         index += 1
     return delimiters
+
+
+def _is_heredoc_terminator(line: str, delimiter: str, strip_tabs: bool) -> bool:
+    """Shell rule: ``<<`` needs an exact line; ``<<-`` strips leading tabs only."""
+    candidate = line.lstrip("\t") if strip_tabs else line
+    return candidate == delimiter
 
 
 def _strip_heredocs(command: str) -> str:
@@ -104,12 +96,14 @@ def _strip_heredocs(command: str) -> str:
     kept: List[str] = []
     index = 0
     while index < len(lines):
-        line = _neutralize_quoted_heredocs(lines[index])
+        line = lines[index]
         kept.append(line)
         delimiters = _heredoc_delimiters(line)
         index += 1
-        for delimiter in delimiters:
-            while index < len(lines) and lines[index].strip() != delimiter:
+        for delimiter, strip_tabs in delimiters:
+            while index < len(lines) and not _is_heredoc_terminator(
+                lines[index], delimiter, strip_tabs
+            ):
                 index += 1
             if index < len(lines):
                 index += 1  # drop the delimiter line too

@@ -113,6 +113,18 @@ def _session_key(kwargs: dict) -> str:
     return str(kwargs.get("session_id") or kwargs.get("task_id") or "")
 
 
+def _trim_locked() -> None:
+    """Evict inactive sessions until the map is within ``MAX_TRACKED_SESSIONS``."""
+    while len(_injected) > MAX_TRACKED_SESSIONS:
+        victim = next(
+            (key for key in _injected if _active_sessions.get(key, 0) == 0),
+            None,
+        )
+        if victim is None:
+            return
+        del _injected[victim]
+
+
 def _session_cache(session_key: str) -> Set[str]:
     """Return the injected-path cache for *session_key*, evicting the oldest
     inactive session once ``MAX_TRACKED_SESSIONS`` is reached."""
@@ -140,6 +152,7 @@ def _deactivate(session_key: str) -> None:
             _active_sessions[session_key] = remaining
         else:
             _active_sessions.pop(session_key, None)
+        _trim_locked()
 
 
 def _reserve(cache: Set[str], key: str) -> bool:
@@ -311,6 +324,8 @@ def _looks_sensitive(path: Path) -> bool:
     """Name-based deny list that works even when the core guard is unavailable."""
     name = path.name.lower()
     if name == ".env" or name.startswith(".env."):
+        return True
+    if name.startswith("id_") or name.startswith("secrets."):
         return True
     if name in _SENSITIVE_NAMES or path.suffix.lower() in _SENSITIVE_SUFFIXES:
         return True
