@@ -170,13 +170,19 @@ def _deactivate(session_key: str) -> None:
         remaining = _active_sessions.get(session_key, 0) - 1
         if remaining > 0:
             _active_sessions[session_key] = remaining
-        else:
-            _active_sessions.pop(session_key, None)
-        if session_key in _injected:
-            _last_seen[session_key] = time.monotonic()
-        else:
-            # A call that injected nothing must not leave cache metadata behind.
+            if session_key in _injected:
+                _last_seen[session_key] = time.monotonic()
+            return
+        _active_sessions.pop(session_key, None)
+        cache = _injected.get(session_key)
+        if cache is None:
             _last_seen.pop(session_key, None)
+        elif not cache:
+            # A call that found no instruction file must not leave metadata.
+            del _injected[session_key]
+            _last_seen.pop(session_key, None)
+        else:
+            _last_seen[session_key] = time.monotonic()
         _trim_locked()
 
 

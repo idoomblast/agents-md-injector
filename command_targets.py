@@ -43,11 +43,18 @@ def _unquote_fragment(text: str, quote: str) -> str:
     result: List[str] = []
     index = 0
     while index < len(text):
-        if text[index] == "\\" and index + 1 < len(text):
-            result.append(text[index + 1])
-            index += 2
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            following = text[index + 1]
+            # In double quotes a backslash only escapes $ ` " \ and newline.
+            if following in {"$", "`", '"', "\\", "\n"}:
+                result.append(following)
+                index += 2
+                continue
+            result.append(char)
+            index += 1
             continue
-        result.append(text[index])
+        result.append(char)
         index += 1
     return "".join(result)
 
@@ -148,7 +155,7 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
-_HEREDOC_DASH = "__HEREDOC_DASH__"
+_HEREDOC_DASH = "\x00"
 
 
 def _normalize_heredoc_dash(command: str) -> str:

@@ -9,10 +9,11 @@ from pathlib import Path
 import pytest
 
 
-def make_repo(root):
+def make_repo(root, *, instructions=True):
     repo = root / "repo"
     (repo / ".git").mkdir(parents=True)
-    (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
+    if instructions:
+        (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
     (repo / "src").mkdir()
     (repo / "src" / "app.py").write_text("app", encoding="utf-8")
     (repo / "README.md").write_text("readme", encoding="utf-8")
@@ -293,3 +294,34 @@ def test_no_target_calls_do_not_leak_session_metadata(injector):
 
     assert injector._injected == {}
     assert injector._last_seen == {}
+
+
+def test_valid_read_without_instructions_leaves_no_metadata(injector, tmp_path):
+    repo = make_repo(tmp_path, instructions=False)
+
+    output = hook(
+        injector, "read_file", {"path": str(repo / "src" / "app.py")}, "content"
+    )
+
+    assert output is None
+    assert injector._injected == {}
+    assert injector._last_seen == {}
+
+
+def test_backslash_before_ordinary_char_kept_in_delimiter(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    command = 'cat <<E"F\\qO"\nEF\\qO\ncat plugin.yaml'
+
+    targets = injector.extract_terminal_targets(command, repo)
+
+    assert [path.name for path in targets] == ["plugin.yaml"]
+
+
+def test_heredoc_sentinel_filename_is_still_a_target(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    odd = repo / "__HEREDOC_DASH__"
+    odd.write_text("literal", encoding="utf-8")
+
+    targets = injector.extract_terminal_targets("cat __HEREDOC_DASH__", repo)
+
+    assert targets == [odd.resolve()]
