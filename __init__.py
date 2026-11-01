@@ -175,7 +175,19 @@ def _is_inside(path: Path, parent: Path) -> bool:
 
 
 def _core_should_skip(target_dir: Path, working_dir: Path) -> bool:
-    return core_hints_active(working_dir) and _is_inside(target_dir, working_dir)
+    """True when Hermes core's own hints already cover *target_dir*.
+
+    Core anchors on the session workspace and only covers targets inside it.
+    Requiring the working dir to be the target's repository root keeps the gate
+    from misfiring when ``TERMINAL_CWD`` points at a non-project directory
+    (e.g. the Hermes home) while core's session cwd is the real workspace.
+    """
+    if not core_hints_active(working_dir):
+        return False
+    if not _is_inside(target_dir, working_dir):
+        return False
+    repo_root = find_git_root(target_dir)
+    return repo_root is not None and repo_root == working_dir.resolve()
 
 
 def _resolve_from(value: Any, base: Path) -> Optional[Path]:

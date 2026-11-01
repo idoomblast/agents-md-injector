@@ -100,6 +100,23 @@ def test_core_gate_skips_in_working_directory(injector, tmp_path, monkeypatch):
     assert hook(injector, "terminal", {"command": "cat src/app.py"}, "output") is None
 
 
+def test_core_gate_does_not_skip_when_working_dir_is_not_repo_root(
+    injector, tmp_path, monkeypatch
+):
+    """A TERMINAL_CWD that is not the target's repo root must not suppress injection.
+
+    In the TUI, TERMINAL_CWD can point at the Hermes home while core's session
+    workspace is elsewhere (or home-like and therefore disabled). Gating on
+    containment alone silently dropped instructions there.
+    """
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "output")
+
+    assert output is not None and "repo rules" in output
+
+
 def test_dedupe_is_shared_across_search_read_terminal(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     session_dir = tmp_path / "session"

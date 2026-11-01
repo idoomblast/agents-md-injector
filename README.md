@@ -127,8 +127,10 @@ content was cut:
 ### Coordination with Hermes core hints
 
 When Hermes core subdirectory hints are active, targets inside the terminal working directory
-are skipped because core already appends their instructions. Targets outside that directory are
-still eligible. `read_file` keeps its original behavior. Core hints are disabled by Hermes in
+are skipped **when that working directory is the target's repository root** (the specialist
+dispatch shape: `cwd=<repo>`), because core already appends their instructions. Targets outside
+that directory, and targets under a working directory that is not their repo root (for example a
+`TERMINAL_CWD` pointing at the Hermes home), stay eligible. Core hints are disabled by Hermes in
 home-like working directories, so this plugin continues to provide the context there.
 
 ### One hook wins
