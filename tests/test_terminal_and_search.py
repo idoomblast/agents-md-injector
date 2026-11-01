@@ -109,7 +109,7 @@ def test_core_gate_does_not_skip_when_working_dir_is_not_repo_root(
     workspace is elsewhere (or home-like and therefore disabled). Gating on
     containment alone silently dropped instructions there.
     """
-    repo = make_repo(tmp_path)
+    make_repo(tmp_path)
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
 
     output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "output")

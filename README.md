@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.0 · **Tests:** 65 · **License:** MIT
+**Version:** 1.2.1 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -117,12 +117,17 @@ content was cut:
    reads local rules before global rules.
 5. **Once per session.** Each instruction file is injected at most once per Hermes session
    (`session_id`, falling back to `task_id`). Parallel gateway sessions each get their own
-   copy; the tracked-session map is bounded and evicts the oldest session.
+   copy; the tracked-session map is bounded and evicts the oldest session. The check-and-claim
+   is atomic, so concurrent tool calls cannot inject the same file twice.
 6. **Reading `AGENTS.md` itself injects nothing.** The content is already the tool result.
 7. **Fail open.** A missing directory, unreadable file, decode error, or unexpected bug
    returns `None` — the tool result is never broken by this plugin.
 8. **Size-capped.** Per-file and total caps apply *before* anything is appended, so one
    runaway `AGENTS.md` cannot flood the context window.
+9. **Instruction-file safety.** A symlinked `AGENTS.md` is followed only when its resolved
+   target stays inside the repository; links that escape the tree are ignored. Targets that
+   Hermes' own read guard classifies as sensitive (`.env`, private keys, credentials) are
+   always skipped.
 
 ### Coordination with Hermes core hints
 
@@ -200,7 +205,8 @@ agents-md-injector/
 │   ├── conftest.py      # loads the plugin like the Hermes loader
 │   ├── test_injector.py # read_file behavior, dedupe, caps, path boundaries
 │   ├── test_command_targets.py # terminal shell classifier
-│   └── test_terminal_and_search.py # terminal/search_files integration
+│   ├── test_terminal_and_search.py # terminal/search_files integration
+│   └── test_regressions_v1_2_1.py # acceptance-gate regressions (symlinks, heredoc, dedupe race)
 ├── README.md
 └── LICENSE
 ```

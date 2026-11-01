@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Set, Tuple
 
@@ -46,6 +47,7 @@ DEFAULT_MAX_SEARCH_DIRS = 5
 
 # Session key -> canonical paths already injected in that session.
 _injected: dict[str, Set[str]] = {}
+_injected_lock = threading.Lock()
 
 
 # ── Configuration helpers ─────────────────────────────────────────────────────
@@ -112,20 +114,43 @@ def _session_key(kwargs: dict) -> str:
 def _session_cache(session_key: str) -> Set[str]:
     """Return the injected-path cache for *session_key*, evicting the oldest
     session once ``MAX_TRACKED_SESSIONS`` is reached."""
-    cache = _injected.get(session_key)
-    if cache is None:
-        if len(_injected) >= MAX_TRACKED_SESSIONS:
-            _injected.pop(next(iter(_injected)))
-        cache = _injected[session_key] = set()
-    return cache
+    with _injected_lock:
+        cache = _injected.get(session_key)
+        if cache is None:
+            if len(_injected) >= MAX_TRACKED_SESSIONS:
+                _injected.pop(next(iter(_injected)))
+            cache = _injected[session_key] = set()
+        return cache
+
+
+def _reserve(cache: Set[str], key: str) -> bool:
+    """Atomically claim *key*; False when it was already claimed."""
+    with _injected_lock:
+        if key in cache:
+            return False
+        cache.add(key)
+        return True
+
+
+def _release(cache: Set[str], key: str) -> None:
+    """Give a reservation back so a later call may retry the read."""
+    with _injected_lock:
+        cache.discard(key)
+
+
+def _mark_seen(cache: Set[str], key: str) -> None:
+    """Record a path as handled without claiming it for a read."""
+    with _injected_lock:
+        cache.add(key)
 
 
 def reset_cache(session_key: Optional[str] = None) -> None:
     """Forget injected files (one session when given, otherwise all sessions)."""
-    if session_key is None:
-        _injected.clear()
-    else:
-        _injected.pop(session_key, None)
+    with _injected_lock:
+        if session_key is None:
+            _injected.clear()
+        else:
+            _injected.pop(session_key, None)
 
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -161,7 +186,7 @@ def core_hints_active(working_dir: Path) -> bool:
     resolved = working_dir.resolve()
     if resolved == home or resolved in {Path("/home"), Path("/root"), Path("/workspace")}:
         return False
-    if resolved.parent in {Path("/home"), Path("/root")}:
+    if resolved.parent in {Path("/home"), Path("/root"), Path("/workspace")}:
         return False
     return not any(part in {".home", "host-home", "host_home"} for part in resolved.parts)
 
@@ -245,6 +270,22 @@ def _read_text_limited(path: Path, max_bytes: int) -> Tuple[str, int]:
     return data.decode("utf-8", errors="replace").strip(), omitted
 
 
+def _read_blocked(path: Path) -> bool:
+    """True when Hermes' own read guard refuses *path*.
+
+    The import is lazy: the plugin also runs under its test harness, where the
+    core package is not importable.
+    """
+    try:
+        from agent.file_safety import get_read_block_error
+    except Exception:
+        return False
+    try:
+        return get_read_block_error(str(path)) is not None
+    except Exception:
+        return False
+
+
 def collect_instruction_chunks(
     path: Path,
     *,
@@ -292,17 +333,25 @@ def collect_instruction_chunks(
                 continue
 
             key = str(resolved)
-            if key in cache:
+            if total_budget and used >= total_budget:
+                return chunks
+            if not _reserve(cache, key):
                 continue
 
             # Reading the instruction file itself: its content is already the
-            # tool result, so mark it seen and move on.
+            # tool result, so keep it reserved and move on.
             if resolved == path.resolve():
-                cache.add(key)
                 continue
 
-            if total_budget and used >= total_budget:
-                return chunks
+            # A symlinked instruction file may point outside the tree it sits
+            # in (e.g. at ~/.aws/credentials). Only trust links that stay
+            # inside the repository, and refuse known-sensitive targets.
+            if candidate.is_symlink() and not _is_inside(resolved, git_root or start):
+                logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
+                continue
+            if _read_blocked(resolved):
+                logger.debug("Ignoring sensitive instruction target %s", resolved)
+                continue
 
             limit = per_file
             if total_budget:
@@ -312,13 +361,12 @@ def collect_instruction_chunks(
                 content, omitted = _read_text_limited(resolved, limit)
             except OSError as exc:
                 logger.debug("Could not read %s: %s", resolved, exc)
+                _release(cache, key)
                 continue
 
             if not content:
-                cache.add(key)
                 continue
 
-            cache.add(key)
             if omitted:
                 content += (
                     f"\n\n[agents-md-injector: {omitted} bytes truncated "
@@ -412,7 +460,7 @@ def _on_transform_tool_result(
                 if path.name in _configured_filenames() and not _core_should_skip(
                     path.parent, working_dir
                 ):
-                    _session_cache(session_key).add(str(path.resolve()))
+                    _mark_seen(_session_cache(session_key), str(path.resolve()))
         total_budget = _env_bytes(MAX_TOTAL_ENV, DEFAULT_MAX_TOTAL_BYTES)
         total_used = 0
         for path, is_directory in targets:
@@ -436,7 +484,7 @@ def _on_transform_tool_result(
                 if "\n" in chunk
             )
             if not is_directory and path.name in _configured_filenames():
-                _session_cache(session_key).add(str(path.resolve()))
+                _mark_seen(_session_cache(session_key), str(path.resolve()))
     except Exception as exc:  # never break a tool call because of this plugin
         logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
         return None

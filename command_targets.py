@@ -7,6 +7,7 @@ classifier for common read/search commands, not a general shell interpreter.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -20,6 +21,33 @@ READ_COMMANDS = {
 SEARCH_COMMANDS = {"find", "fd"}
 SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
 WRAPPERS = {"sudo", "env", "time", "nice", "ionice", "timeout", "command", "builtin", "exec", "nohup"}
+
+# Heredoc marker in a command line: <<EOF, <<-EOF, <<'EOF', <<"EOF".
+_HEREDOC_RE = re.compile(r"<<-?\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+
+
+def _strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies so feed content is never parsed as argv.
+
+    Only the marker line survives (it is a redirection the tokenizer drops).
+    """
+    lines = command.splitlines()
+    kept: List[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        match = _HEREDOC_RE.search(line)
+        if match is None:
+            index += 1
+            continue
+        delimiter = match.group("delimiter")
+        index += 1
+        while index < len(lines) and lines[index].strip() != delimiter:
+            index += 1
+        if index < len(lines):
+            index += 1  # drop the delimiter line too
+    return "\n".join(kept)
 
 
 def _resolve(path: str, cwd: Path) -> Path:
@@ -345,6 +373,22 @@ def _read_operands(command: str, args: Sequence[str]) -> Optional[List[str]]:
         "hexdump": {"-n", "-s", "-e", "-f"},
         "strings": {"-n", "-t"},
         "uniq": {"-f", "-s", "-w"},
+        # Delimiter/field/format arguments are values, not input files.
+        "paste": {"-d", "--delimiters"},
+        "join": {
+            "-1", "-2", "-j", "-o", "-t", "-e", "-a", "-v", "--field-separator",
+        },
+        "less": {
+            "-p", "--pattern", "-P", "--prompt", "-x", "--tabs", "-y", "--shift",
+            "-z", "--window", "-b", "--buffers", "-h", "--max-back-scroll",
+            "-j", "--jump-target", "-k", "--lesskey-file", "-o", "--log-file",
+            "-O", "--LOG-FILE",
+        },
+        "more": {"-n", "--lines"},
+        "bat": {
+            "-l", "--language", "-r", "--range", "--theme", "--style", "--tabs",
+            "--wrap", "--terminal-width", "--pager", "-H", "--highlight-line",
+        },
     }
     if command in {"diff", "cmp"}:
         valued = {"-U", "-C", "-L", "--label", "-S", "--starting-file", "--from-file", "--to-file"}
@@ -450,7 +494,7 @@ def extract_terminal_targets(
     """
     base = _resolve(os.fspath(workdir), working_dir) if workdir else working_dir.resolve()
     try:
-        tokens = _shell_tokens(command)
+        tokens = _shell_tokens(_strip_heredocs(command))
     except (ValueError, OSError):
         return []
     segments = _segments(tokens)
@@ -469,7 +513,6 @@ def extract_terminal_targets(
     seen = set()
     for segment in segments:
         clean, redirected_inputs = _strip_redirections(segment)
-        segment_values = list(redirected_inputs)
         args = _unwrap(clean)
         if not args:
             name = ""
@@ -478,9 +521,6 @@ def extract_terminal_targets(
             name = Path(args[0]).name
             command_args = args[1:]
         if name in {"cd", "pushd"}:
-            targets.extend(
-                _collect_paths(segment_values, current, max_targets - len(targets), seen)
-            )
             operand = next((arg for arg in command_args if not _is_option(arg)), None)
             if operand:
                 try:
@@ -488,11 +528,15 @@ def extract_terminal_targets(
                 except (OSError, RuntimeError):
                     pass
             continue
+        # Input redirection is a read only for commands that read files.
+        segment_values: List[str] = []
         if name in READ_COMMANDS:
+            segment_values.extend(redirected_inputs)
             operands = _read_operands(name, command_args)
             if operands:
                 segment_values.extend(operands)
         elif name in SEARCH_COMMANDS:
+            segment_values.extend(redirected_inputs)
             segment_values.extend(_search_operands(name, command_args))
         targets.extend(_collect_paths(segment_values, current, max_targets - len(targets), seen))
         if len(targets) >= max_targets:
