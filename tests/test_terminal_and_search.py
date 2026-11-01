@@ -186,3 +186,19 @@ def test_instruction_file_target_is_marked_seen(injector, tmp_path):
 
     assert output is None
     assert hook(injector, "read_file", {"path": str(repo / "src" / "app.py")}, "file") is None
+
+
+def test_empty_search_result_does_not_mark_seen(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("", encoding="utf-8")
+    result = json.dumps({"matches": [{"path": str(repo / "AGENTS.md")}]})
+
+    assert hook(injector, "search_files", {"path": str(repo)}, result) is None
+    assert injector._injected == {}
+    assert injector._last_seen == {}
+
+    (repo / "AGENTS.md").write_text("later rules", encoding="utf-8")
+    output = hook(
+        injector, "read_file", {"path": str(repo / "src" / "app.py")}, "file"
+    )
+    assert output is not None and "later rules" in output

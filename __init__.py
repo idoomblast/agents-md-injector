@@ -619,7 +619,12 @@ def _on_transform_tool_result(
                 if path.name in _configured_filenames() and not _core_should_skip(
                     path.parent, working_dir
                 ):
-                    _mark_seen(_session_cache(session_key), str(path.resolve()))
+                    try:
+                        content, _ = _read_text_limited(path.resolve(), 4096)
+                    except OSError:
+                        continue
+                    if content:
+                        _mark_seen(_session_cache(session_key), str(path.resolve()))
         total_budget = _env_bytes(MAX_TOTAL_ENV, DEFAULT_MAX_TOTAL_BYTES)
         total_used = 0
         for path, is_directory in targets:
