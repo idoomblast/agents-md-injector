@@ -121,7 +121,10 @@ def test_symlinked_sensitive_file_inside_repo_is_blocked_without_core_guard(
     assert output is None
 
 
-@pytest.mark.parametrize("name", ["id_custom", "secrets.toml", ".envrc"])
+@pytest.mark.parametrize(
+    "name",
+    ["id_custom", "secrets.toml", ".envrc", "server.crt", "server.cer", "server.der"],
+)
 def test_sensitive_prefixes_blocked_without_core_guard(injector, tmp_path, monkeypatch, name):
     repo = make_repo(tmp_path)
     secret = repo / name
@@ -136,9 +139,12 @@ def test_sensitive_prefixes_blocked_without_core_guard(injector, tmp_path, monke
     assert output is None
 
 
-def test_sensitive_prefix_blocked_when_core_guard_raises(injector, tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", [".envrc", "server.crt"])
+def test_sensitive_prefix_blocked_when_core_guard_raises(
+    injector, tmp_path, monkeypatch, name
+):
     repo = make_repo(tmp_path)
-    secret = repo / ".envrc"
+    secret = repo / name
     secret.write_text("export TOKEN=top-secret", encoding="utf-8")
     (repo / "AGENTS.md").unlink()
     os.symlink(secret, repo / "AGENTS.md")
@@ -259,3 +265,31 @@ def test_spaced_dash_heredoc_does_not_target_the_delimiter(injector, tmp_path):
     targets = injector.extract_terminal_targets(command, repo)
 
     assert [path.name for path in targets] == ["plugin.yaml"]
+
+
+def test_escaped_quote_in_heredoc_delimiter(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    command = 'cat <<E"F\\"O"\nEF"O\ncat plugin.yaml'
+
+    targets = injector.extract_terminal_targets(command, repo)
+
+    assert [path.name for path in targets] == ["plugin.yaml"]
+
+
+def test_spaced_heredoc_dash_keeps_file_operand(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "EOF").write_text("data", encoding="utf-8")
+    command = "cat << - EOF\n-\ncat plugin.yaml"
+
+    targets = injector.extract_terminal_targets(command, repo)
+
+    assert {path.name for path in targets} == {"EOF", "plugin.yaml"}
+
+
+def test_no_target_calls_do_not_leak_session_metadata(injector):
+    injector.reset_cache()
+    for index in range(100):
+        hook(injector, "read_file", {"path": ""}, "content", session=f"s{index}")
+
+    assert injector._injected == {}
+    assert injector._last_seen == {}

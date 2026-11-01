@@ -161,7 +161,8 @@ def _session_cache(session_key: str) -> Set[str]:
 def _activate(session_key: str) -> None:
     with _injected_lock:
         _active_sessions[session_key] = _active_sessions.get(session_key, 0) + 1
-        _last_seen[session_key] = time.monotonic()
+        if session_key in _injected:
+            _last_seen[session_key] = time.monotonic()
 
 
 def _deactivate(session_key: str) -> None:
@@ -171,7 +172,11 @@ def _deactivate(session_key: str) -> None:
             _active_sessions[session_key] = remaining
         else:
             _active_sessions.pop(session_key, None)
-        _last_seen[session_key] = time.monotonic()
+        if session_key in _injected:
+            _last_seen[session_key] = time.monotonic()
+        else:
+            # A call that injected nothing must not leave cache metadata behind.
+            _last_seen.pop(session_key, None)
         _trim_locked()
 
 
@@ -338,7 +343,18 @@ _SENSITIVE_NAMES = {
     "secrets.yaml",
     "secrets.yml",
 }
-_SENSITIVE_SUFFIXES = {".asc", ".jks", ".key", ".keystore", ".p12", ".pem", ".pfx"}
+_SENSITIVE_SUFFIXES = {
+    ".asc",
+    ".cer",
+    ".crt",
+    ".der",
+    ".jks",
+    ".key",
+    ".keystore",
+    ".p12",
+    ".pem",
+    ".pfx",
+}
 _SENSITIVE_DIRS = {".aws", ".gnupg", ".kube", ".ssh"}
 
 

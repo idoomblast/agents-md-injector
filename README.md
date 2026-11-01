@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.4 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.5 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -127,7 +127,8 @@ content was cut:
    runaway `AGENTS.md` cannot flood the context window.
 9. **Instruction-file safety.** A symlinked `AGENTS.md` is followed only when its resolved
    target stays inside the repository; links that escape the tree are ignored. A built-in
-   deny list (`.env*`, private keys, cloud credentials, `secrets.*`, `.ssh`/`.aws`/`.kube`)
+   deny list (`.env*`, private keys and certificates, cloud credentials, `secrets.*`,
+   `.ssh`/`.aws`/`.kube`)
    refuses sensitive targets even when Hermes' read guard is unavailable, and the guard is
    consulted for everything else.
 

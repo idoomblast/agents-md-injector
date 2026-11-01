@@ -22,6 +22,36 @@ SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
 WRAPPERS = {"sudo", "env", "time", "nice", "ionice", "timeout", "command", "builtin", "exec", "nohup"}
 
 # Heredoc markers: <<EOF, <<-EOF, <<'EOF', <<"EOF", and several per line.
+def _find_closing_quote(line: str, start: int, quote: str) -> int:
+    """Index of the closing quote, honouring backslash escapes in double quotes."""
+    index = start
+    while index < len(line):
+        char = line[index]
+        if quote == '"' and char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index
+        index += 1
+    return -1
+
+
+def _unquote_fragment(text: str, quote: str) -> str:
+    """Apply shell quote removal to one quoted fragment."""
+    if quote == "'":
+        return text
+    result: List[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text):
+            result.append(text[index + 1])
+            index += 2
+            continue
+        result.append(text[index])
+        index += 1
+    return "".join(result)
+
+
 def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
     """Return ``(delimiter, strip_tabs)`` for each heredoc on *line*.
 
@@ -63,12 +93,12 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
                 if current.isspace() or current in ";|&<>()":
                     break
                 if current in {"'", '"'}:
-                    closing = line.find(current, cursor + 1)
+                    closing = _find_closing_quote(line, cursor + 1, current)
                     if closing == -1:
-                        parts.append(line[cursor + 1:])
+                        parts.append(_unquote_fragment(line[cursor + 1:], current))
                         cursor = len(line)
                         break
-                    parts.append(line[cursor + 1:closing])
+                    parts.append(_unquote_fragment(line[cursor + 1:closing], current))
                     cursor = closing + 1
                     continue
                 if current == "\\":
@@ -116,6 +146,48 @@ def _strip_heredocs(command: str) -> str:
             if index < len(lines):
                 index += 1  # drop the delimiter line too
     return "\n".join(kept)
+
+
+_HEREDOC_DASH = "__HEREDOC_DASH__"
+
+
+def _normalize_heredoc_dash(command: str) -> str:
+    """Replace an adjacent ``<<-`` with a token shlex's punctuation lexer keeps.
+
+    ``<<-`` is one operator in the shell, but ``punctuation_chars`` splits it
+    into ``<<`` and ``-``; ``<< -`` (with a space) is a different construct.
+    """
+    result: List[str] = []
+    index = 0
+    quote = ""
+    while index < len(command):
+        char = command[index]
+        if quote:
+            result.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(command):
+                result.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            result.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(command):
+            result.append(command[index:index + 2])
+            index += 2
+            continue
+        if command.startswith("<<-", index):
+            result.append(f" {_HEREDOC_DASH} ")
+            index += 3
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
 
 
 def _resolve(path: str, cwd: Path) -> Path:
@@ -186,11 +258,10 @@ def _strip_redirections(tokens: Sequence[str]) -> Tuple[List[str], List[str]]:
         if token in {">", ">>", "&>", "&>>", "<<<"}:
             index += 2
             continue
+        if token == _HEREDOC_DASH:
+            index += 2 if index + 1 < len(tokens) else 1
+            continue
         if token in {"<", "<<", "<<-"}:
-            if token == "<<" and index + 1 < len(tokens) and tokens[index + 1] == "-":
-                # The punctuation lexer splits `<<-` into `<<` and `-`.
-                index += 3 if index + 2 < len(tokens) else 2
-                continue
             if index + 1 < len(tokens):
                 if token == "<":
                     inputs.append(tokens[index + 1])
@@ -566,7 +637,7 @@ def extract_terminal_targets(
     """
     base = _resolve(os.fspath(workdir), working_dir) if workdir else working_dir.resolve()
     try:
-        tokens = _shell_tokens(_strip_heredocs(command))
+        tokens = _shell_tokens(_normalize_heredoc_dash(_strip_heredocs(command)))
     except (ValueError, OSError):
         return []
     segments = _segments(tokens)
