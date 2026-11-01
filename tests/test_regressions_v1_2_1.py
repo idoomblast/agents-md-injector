@@ -98,3 +98,51 @@ def test_reserve_claims_a_key_once_under_concurrency(injector):
 
     assert results.count(True) == 1
     assert "k" in cache
+
+
+def test_symlinked_sensitive_file_inside_repo_is_blocked_without_core_guard(
+    injector, tmp_path, monkeypatch
+):
+    import sys
+
+    repo = make_repo(tmp_path)
+    secret = repo / ".env"
+    secret.write_text("API_KEY=super-secret", encoding="utf-8")
+    (repo / "AGENTS.md").unlink()
+    os.symlink(secret, repo / "AGENTS.md")
+    # Simulate a host where the core read guard cannot be imported.
+    monkeypatch.setitem(sys.modules, "agent.file_safety", None)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "raw")
+
+    assert output is None
+
+
+def test_quoted_heredoc_marker_does_not_swallow_later_commands(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    command = "grep '<<EOF' README.md\ncat plugin.yaml"
+
+    targets = injector.extract_terminal_targets(command, repo)
+
+    assert {path.name for path in targets} == {"README.md", "plugin.yaml"}
+
+
+def test_multiple_heredocs_skip_every_body(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    command = "cat <<A <<B\nREADME.md\nA\nplugin.yaml\nB"
+
+    assert injector.extract_terminal_targets(command, repo) == []
+
+
+def test_active_session_cache_is_not_evicted(injector):
+    injector.reset_cache()
+    injector._activate("s1")
+    try:
+        first = injector._session_cache("s1")
+        for index in range(injector.MAX_TRACKED_SESSIONS):
+            injector._session_cache(f"other-{index}")
+        assert injector._session_cache("s1") is first
+        assert "s1" in injector._injected
+    finally:
+        injector._deactivate("s1")

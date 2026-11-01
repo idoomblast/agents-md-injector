@@ -22,31 +22,97 @@ SEARCH_COMMANDS = {"find", "fd"}
 SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")"}
 WRAPPERS = {"sudo", "env", "time", "nice", "ionice", "timeout", "command", "builtin", "exec", "nohup"}
 
-# Heredoc marker in a command line: <<EOF, <<-EOF, <<'EOF', <<"EOF".
-_HEREDOC_RE = re.compile(r"<<-?\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+# Heredoc markers: <<EOF, <<-EOF, <<'EOF', <<"EOF", and several per line.
+_QUOTED_HEREDOC_RE = re.compile(
+    r"(?P<quote>['\"])(?P<marker><<-?[A-Za-z_][A-Za-z0-9_]*)(?P=quote)"
+)
+
+
+def _neutralize_quoted_heredocs(line: str) -> str:
+    """Neuter quoted ``'<<EOF'`` tokens so the tokenizer keeps them as operands.
+
+    shlex drops quote information, so a quoted pattern such as ``grep '<<EOF'
+    file`` would otherwise look like an input redirection and swallow ``file``.
+    """
+    return _QUOTED_HEREDOC_RE.sub(
+        lambda match: f"{match.group('quote')}q{match.group('marker')}{match.group('quote')}",
+        line,
+    )
+
+
+def _heredoc_delimiters(line: str) -> List[str]:
+    """Return heredoc delimiters on *line*, ignoring markers inside quotes."""
+    delimiters: List[str] = []
+    index = 0
+    quote = ""
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == "<" and line.startswith("<<", index) and not line.startswith("<<<", index):
+            cursor = index + 2
+            if cursor < len(line) and line[cursor] == "-":
+                cursor += 1
+            while cursor < len(line) and line[cursor] in " \t":
+                cursor += 1
+            if cursor >= len(line):
+                index = cursor
+                continue
+            if line[cursor] in {"'", '"'}:
+                closing = line.find(line[cursor], cursor + 1)
+                if closing == -1:
+                    index = cursor + 1
+                    continue
+                delimiters.append(line[cursor + 1:closing])
+                index = closing + 1
+                continue
+            start = cursor
+            while (
+                cursor < len(line)
+                and not line[cursor].isspace()
+                and line[cursor] not in ";|&<>()"
+            ):
+                cursor += 1
+            if cursor > start:
+                delimiters.append(line[start:cursor].replace("\\", ""))
+            index = cursor
+            continue
+        index += 1
+    return delimiters
 
 
 def _strip_heredocs(command: str) -> str:
     """Remove heredoc bodies so feed content is never parsed as argv.
 
     Only the marker line survives (it is a redirection the tokenizer drops).
+    Handles several heredocs per line and ignores quoted markers.
     """
     lines = command.splitlines()
     kept: List[str] = []
     index = 0
     while index < len(lines):
-        line = lines[index]
+        line = _neutralize_quoted_heredocs(lines[index])
         kept.append(line)
-        match = _HEREDOC_RE.search(line)
-        if match is None:
-            index += 1
-            continue
-        delimiter = match.group("delimiter")
+        delimiters = _heredoc_delimiters(line)
         index += 1
-        while index < len(lines) and lines[index].strip() != delimiter:
-            index += 1
-        if index < len(lines):
-            index += 1  # drop the delimiter line too
+        for delimiter in delimiters:
+            while index < len(lines) and lines[index].strip() != delimiter:
+                index += 1
+            if index < len(lines):
+                index += 1  # drop the delimiter line too
     return "\n".join(kept)
 
 

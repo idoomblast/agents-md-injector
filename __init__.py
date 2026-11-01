@@ -48,6 +48,8 @@ DEFAULT_MAX_SEARCH_DIRS = 5
 # Session key -> canonical paths already injected in that session.
 _injected: dict[str, Set[str]] = {}
 _injected_lock = threading.Lock()
+# Sessions with a transform in flight; their cache must not be evicted.
+_active_sessions: dict[str, int] = {}
 
 
 # ── Configuration helpers ─────────────────────────────────────────────────────
@@ -113,14 +115,31 @@ def _session_key(kwargs: dict) -> str:
 
 def _session_cache(session_key: str) -> Set[str]:
     """Return the injected-path cache for *session_key*, evicting the oldest
-    session once ``MAX_TRACKED_SESSIONS`` is reached."""
+    inactive session once ``MAX_TRACKED_SESSIONS`` is reached."""
     with _injected_lock:
         cache = _injected.get(session_key)
         if cache is None:
             if len(_injected) >= MAX_TRACKED_SESSIONS:
-                _injected.pop(next(iter(_injected)))
+                for victim in list(_injected):
+                    if _active_sessions.get(victim, 0) == 0:
+                        del _injected[victim]
+                        break
             cache = _injected[session_key] = set()
         return cache
+
+
+def _activate(session_key: str) -> None:
+    with _injected_lock:
+        _active_sessions[session_key] = _active_sessions.get(session_key, 0) + 1
+
+
+def _deactivate(session_key: str) -> None:
+    with _injected_lock:
+        remaining = _active_sessions.get(session_key, 0) - 1
+        if remaining > 0:
+            _active_sessions[session_key] = remaining
+        else:
+            _active_sessions.pop(session_key, None)
 
 
 def _reserve(cache: Set[str], key: str) -> bool:
@@ -149,6 +168,7 @@ def reset_cache(session_key: Optional[str] = None) -> None:
     with _injected_lock:
         if session_key is None:
             _injected.clear()
+            _active_sessions.clear()
         else:
             _injected.pop(session_key, None)
 
@@ -270,12 +290,41 @@ def _read_text_limited(path: Path, max_bytes: int) -> Tuple[str, int]:
     return data.decode("utf-8", errors="replace").strip(), omitted
 
 
-def _read_blocked(path: Path) -> bool:
-    """True when Hermes' own read guard refuses *path*.
+_SENSITIVE_NAMES = {
+    ".netrc",
+    ".pgpass",
+    ".htpasswd",
+    "credentials",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+}
+_SENSITIVE_SUFFIXES = {".asc", ".jks", ".key", ".keystore", ".p12", ".pem", ".pfx"}
+_SENSITIVE_DIRS = {".aws", ".gnupg", ".kube", ".ssh"}
 
-    The import is lazy: the plugin also runs under its test harness, where the
-    core package is not importable.
+
+def _looks_sensitive(path: Path) -> bool:
+    """Name-based deny list that works even when the core guard is unavailable."""
+    name = path.name.lower()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name in _SENSITIVE_NAMES or path.suffix.lower() in _SENSITIVE_SUFFIXES:
+        return True
+    return any(part.lower() in _SENSITIVE_DIRS for part in path.parts)
+
+
+def _read_blocked(path: Path) -> bool:
+    """True when *path* must not be injected as instructions.
+
+    The known-sensitive names are always refused, so the guard cannot fail
+    open when Hermes core is not importable (plugin tests, standalone use).
     """
+    if _looks_sensitive(path):
+        return True
     try:
         from agent.file_safety import get_read_block_error
     except Exception:
@@ -403,9 +452,10 @@ def _on_transform_tool_result(
     if _env_flag(DISABLE_ENV):
         return None
 
+    session_key = _session_key(kwargs)
+    _activate(session_key)
     try:
         working_dir = _working_dir()
-        session_key = _session_key(kwargs)
         targets: List[Tuple[Path, bool]] = []
 
         if tool_name == "read_file":
@@ -488,6 +538,8 @@ def _on_transform_tool_result(
     except Exception as exc:  # never break a tool call because of this plugin
         logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
         return None
+    finally:
+        _deactivate(session_key)
 
     if not chunks:
         return None

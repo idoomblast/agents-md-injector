@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.1 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.2 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -125,9 +125,10 @@ content was cut:
 8. **Size-capped.** Per-file and total caps apply *before* anything is appended, so one
    runaway `AGENTS.md` cannot flood the context window.
 9. **Instruction-file safety.** A symlinked `AGENTS.md` is followed only when its resolved
-   target stays inside the repository; links that escape the tree are ignored. Targets that
-   Hermes' own read guard classifies as sensitive (`.env`, private keys, credentials) are
-   always skipped.
+   target stays inside the repository; links that escape the tree are ignored. A built-in
+   deny list (`.env*`, private keys, cloud credentials, `secrets.*`, `.ssh`/`.aws`/`.kube`)
+   refuses sensitive targets even when Hermes' read guard is unavailable, and the guard is
+   consulted for everything else.
 
 ### Coordination with Hermes core hints
 
