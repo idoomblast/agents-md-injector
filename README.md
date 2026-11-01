@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.6 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.7 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -79,7 +79,7 @@ per-service, or in `~/.hermes/.env`. No config schema, no restart needed to chan
 | `AGENTS_MD_INJECTOR_DISABLE` | *(unset)* | `1`/`true`/`yes`/`on` disables injection entirely |
 | `AGENTS_MD_INJECTOR_FILENAMES` | `AGENTS.md,agents.md` | Comma-separated instruction filenames, checked in order per directory |
 | `AGENTS_MD_INJECTOR_MAX_BYTES` | `32768` | Per-file byte cap before truncation; `0` = unlimited |
-| `AGENTS_MD_INJECTOR_MAX_TOTAL_BYTES` | `65536` | Total bytes appended per tool result; `0` = unlimited |
+| `AGENTS_MD_INJECTOR_MAX_TOTAL_BYTES` | `65536` | Total bytes appended per tool result, including headers, separators, and truncation markers; `0` = unlimited |
 | `AGENTS_MD_INJECTOR_MAX_TERMINAL_TARGETS` | `8` | Maximum distinct existing paths classified from one terminal command |
 | `AGENTS_MD_INJECTOR_MAX_SEARCH_DIRS` | `5` | Maximum distinct result directories refined from `search_files`; `0` disables refinement |
 

@@ -325,3 +325,31 @@ def test_heredoc_sentinel_filename_is_still_a_target(injector, tmp_path):
     targets = injector.extract_terminal_targets("cat __HEREDOC_DASH__", repo)
 
     assert targets == [odd.resolve()]
+
+
+def test_empty_instruction_file_is_released(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("", encoding="utf-8")
+
+    first = hook(injector, "read_file", {"path": str(repo / "src" / "app.py")}, "content")
+    assert first is None
+    assert injector._injected == {}
+    assert injector._last_seen == {}
+
+    (repo / "AGENTS.md").write_text("late rules", encoding="utf-8")
+    second = hook(injector, "read_file", {"path": str(repo / "src" / "app.py")}, "content")
+    assert second is not None and "late rules" in second
+
+
+def test_total_budget_includes_framing(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("x" * 500, encoding="utf-8")
+    monkeypatch.setenv(injector.MAX_TOTAL_ENV, "300")
+    result = "raw"
+
+    output = hook(
+        injector, "terminal", {"command": f"cat {repo / 'src' / 'app.py'}"}, result
+    )
+
+    assert output is not None
+    assert len(output) - len(result) <= 300

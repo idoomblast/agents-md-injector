@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_FILENAMES: Tuple[str, ...] = ("AGENTS.md", "agents.md")
 DEFAULT_MAX_FILE_BYTES = 32 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 64 * 1024
+SEPARATOR = "\n\n---\n\n"
+SEPARATOR_BYTES = len(SEPARATOR.encode("utf-8"))
 MAX_TRACKED_SESSIONS = 64
 # A session idle for less than this keeps its dedupe state even when the map is
 # over its bound; only genuinely stale sessions are evicted.
@@ -473,6 +475,9 @@ def collect_instruction_chunks(
                 continue
 
             if not content:
+                # Nothing to inject: release the reservation so a later call
+                # can inject once the file actually has instructions.
+                _release(cache, key)
                 continue
 
             if omitted:
@@ -480,8 +485,47 @@ def collect_instruction_chunks(
                     f"\n\n[agents-md-injector: {omitted} bytes truncated "
                     f"from {resolved.name}]"
                 )
-            chunks.append(f"Instructions from: {resolved}\n{content}")
-            used += len(content.encode("utf-8"))
+            header = f"Instructions from: {resolved}\n"
+            header_bytes = len(header.encode("utf-8"))
+            marker = ""
+            if omitted:
+                marker = (
+                    f"\n\n[agents-md-injector: {omitted} bytes truncated "
+                    f"from {resolved.name}]"
+                )
+            if total_budget:
+                remaining = total_budget - used
+                if remaining <= SEPARATOR_BYTES + header_bytes:
+                    _release(cache, key)
+                    return chunks
+                max_chunk_bytes = remaining - SEPARATOR_BYTES
+                content_bytes = content.encode("utf-8")
+                marker_bytes = len(marker.encode("utf-8"))
+                content_budget = max(max_chunk_bytes - header_bytes - marker_bytes, 0)
+                if len(content_bytes) > content_budget:
+                    trimmed = content_bytes[:content_budget].decode("utf-8", "ignore")
+                    if omitted:
+                        omitted += len(content_bytes) - len(trimmed.encode("utf-8"))
+                        marker = (
+                            f"\n\n[agents-md-injector: {omitted} bytes truncated "
+                            f"from {resolved.name}]"
+                        )
+                    content = trimmed
+                chunk = header + content + marker
+                if len(chunk.encode("utf-8")) > max_chunk_bytes:
+                    overflow = len(chunk.encode("utf-8")) - max_chunk_bytes
+                    if content:
+                        content = content.encode("utf-8")[:-overflow].decode(
+                            "utf-8", "ignore"
+                        )
+                    chunk = header + content + marker
+                if not content:
+                    _release(cache, key)
+                    continue
+            else:
+                chunk = header + content + marker
+            chunks.append(chunk)
+            used += len(chunk.encode("utf-8")) + SEPARATOR_BYTES
 
         if git_root is not None and current == git_root:
             break
@@ -588,9 +632,7 @@ def _on_transform_tool_result(
             )
             chunks.extend(new_chunks)
             total_used += sum(
-                len(chunk.split("\n", 1)[1].encode("utf-8"))
-                for chunk in new_chunks
-                if "\n" in chunk
+                len(chunk.encode("utf-8")) + SEPARATOR_BYTES for chunk in new_chunks
             )
             if not is_directory and path.name in _configured_filenames():
                 _mark_seen(_session_cache(session_key), str(path.resolve()))
@@ -603,8 +645,7 @@ def _on_transform_tool_result(
     if not chunks:
         return None
 
-    separator = "\n\n---\n\n"
-    return f"{result}{separator}{separator.join(chunks)}"
+    return f"{result}{SEPARATOR}{SEPARATOR.join(chunks)}"
 
 
 def _search_result_directories(

@@ -220,7 +220,7 @@ def test_file_cap_truncates_with_marker(injector, tmp_path, monkeypatch):
 
 
 def test_total_cap_limits_multiple_files(injector, tmp_path, monkeypatch):
-    monkeypatch.setenv(injector.MAX_TOTAL_ENV, "1000")
+    monkeypatch.setenv(injector.MAX_TOTAL_ENV, "1500")
     monkeypatch.setenv(injector.MAX_FILE_ENV, "0")  # unlimited per file
     repo = make_repo(tmp_path)
     write(repo / "AGENTS.md", "r" * 800)
