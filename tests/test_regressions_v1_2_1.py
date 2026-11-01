@@ -38,6 +38,12 @@ def test_symlinked_instruction_outside_repo_is_not_injected(injector, tmp_path, 
     output = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "raw")
 
     assert output is None
+    assert injector._injected == {}
+
+    (repo / "AGENTS.md").unlink()
+    (repo / "AGENTS.md").write_text("real rules", encoding="utf-8")
+    again = hook(injector, "terminal", {"command": "cat repo/src/app.py"}, "raw")
+    assert again is not None and "real rules" in again
 
 
 def test_symlinked_instruction_inside_repo_is_injected(injector, tmp_path, monkeypatch):
@@ -353,3 +359,36 @@ def test_total_budget_includes_framing(injector, tmp_path, monkeypatch):
 
     assert output is not None
     assert len(output) - len(result) <= 300
+    assert output.count("bytes truncated") == 1
+
+
+def test_total_cap_marks_clipped_content(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("x" * 260, encoding="utf-8")
+    monkeypatch.setenv(injector.MAX_TOTAL_ENV, "300")
+    result = "raw"
+
+    output = hook(
+        injector, "terminal", {"command": f"cat {repo / 'src' / 'app.py'}"}, result
+    )
+
+    assert output is not None
+    appended = len(output.encode("utf-8")) - len(result.encode("utf-8"))
+    assert appended <= 300
+    assert output.count("bytes truncated") == 1
+
+
+def test_empty_instruction_self_read_is_released(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("", encoding="utf-8")
+
+    first = hook(injector, "read_file", {"path": str(repo / "AGENTS.md")}, "EMPTY")
+    assert first is None
+    assert injector._injected == {}
+    assert injector._last_seen == {}
+
+    (repo / "AGENTS.md").write_text("rules after", encoding="utf-8")
+    second = hook(
+        injector, "read_file", {"path": str(repo / "src" / "app.py")}, "content"
+    )
+    assert second is not None and "rules after" in second

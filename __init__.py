@@ -448,19 +448,16 @@ def collect_instruction_chunks(
             if not _reserve(cache, key):
                 continue
 
-            # Reading the instruction file itself: its content is already the
-            # tool result, so keep it reserved and move on.
-            if resolved == path.resolve():
-                continue
-
             # A symlinked instruction file may point outside the tree it sits
             # in (e.g. at ~/.aws/credentials). Only trust links that stay
             # inside the repository, and refuse known-sensitive targets.
             if candidate.is_symlink() and not _is_inside(resolved, git_root or start):
                 logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
+                _release(cache, key)
                 continue
             if _read_blocked(resolved):
                 logger.debug("Ignoring sensitive instruction target %s", resolved)
+                _release(cache, key)
                 continue
 
             limit = per_file
@@ -480,19 +477,23 @@ def collect_instruction_chunks(
                 _release(cache, key)
                 continue
 
-            if omitted:
-                content += (
-                    f"\n\n[agents-md-injector: {omitted} bytes truncated "
-                    f"from {resolved.name}]"
-                )
+            # Reading the instruction file itself: its content is already the
+            # tool result, so keep it reserved and move on. Only do this when
+            # the file actually has content; an empty self-read is released
+            # above so a later call can inject it once populated.
+            if resolved == path.resolve():
+                continue
+
             header = f"Instructions from: {resolved}\n"
             header_bytes = len(header.encode("utf-8"))
-            marker = ""
-            if omitted:
-                marker = (
-                    f"\n\n[agents-md-injector: {omitted} bytes truncated "
+
+            def _marker(count: int) -> str:
+                return (
+                    f"\n\n[agents-md-injector: {count} bytes truncated "
                     f"from {resolved.name}]"
                 )
+
+            marker = _marker(omitted) if omitted else ""
             if total_budget:
                 remaining = total_budget - used
                 if remaining <= SEPARATOR_BYTES + header_bytes:
@@ -500,26 +501,31 @@ def collect_instruction_chunks(
                     return chunks
                 max_chunk_bytes = remaining - SEPARATOR_BYTES
                 content_bytes = content.encode("utf-8")
-                marker_bytes = len(marker.encode("utf-8"))
-                content_budget = max(max_chunk_bytes - header_bytes - marker_bytes, 0)
-                if len(content_bytes) > content_budget:
+                content_budget = 0
+                for _ in range(4):
+                    marker_bytes = len(marker.encode("utf-8"))
+                    content_budget = max(
+                        max_chunk_bytes - header_bytes - marker_bytes, 0
+                    )
+                    if len(content_bytes) <= content_budget:
+                        break
                     trimmed = content_bytes[:content_budget].decode("utf-8", "ignore")
-                    if omitted:
-                        omitted += len(content_bytes) - len(trimmed.encode("utf-8"))
-                        marker = (
-                            f"\n\n[agents-md-injector: {omitted} bytes truncated "
-                            f"from {resolved.name}]"
-                        )
-                    content = trimmed
+                    trimmed_bytes = trimmed.encode("utf-8")
+                    cut = len(content_bytes) - len(trimmed_bytes)
+                    if cut <= 0:
+                        break
+                    omitted += cut
+                    marker = _marker(omitted)
+                    content_bytes = trimmed_bytes
+                if content_budget <= 0 or not content_bytes:
+                    _release(cache, key)
+                    continue
+                content = content_bytes.decode("utf-8", "ignore")
                 chunk = header + content + marker
                 if len(chunk.encode("utf-8")) > max_chunk_bytes:
-                    overflow = len(chunk.encode("utf-8")) - max_chunk_bytes
-                    if content:
-                        content = content.encode("utf-8")[:-overflow].decode(
-                            "utf-8", "ignore"
-                        )
-                    chunk = header + content + marker
-                if not content:
+                    # The marker grew after the final trim; shrinking content
+                    # again would make the marker's count stale. Omit the
+                    # chunk rather than emit silently incomplete instructions.
                     _release(cache, key)
                     continue
             else:
@@ -634,8 +640,6 @@ def _on_transform_tool_result(
             total_used += sum(
                 len(chunk.encode("utf-8")) + SEPARATOR_BYTES for chunk in new_chunks
             )
-            if not is_directory and path.name in _configured_filenames():
-                _mark_seen(_session_cache(session_key), str(path.resolve()))
     except Exception as exc:  # never break a tool call because of this plugin
         logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
         return None

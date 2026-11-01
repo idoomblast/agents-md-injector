@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.7 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.8 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -93,8 +93,8 @@ export AGENTS_MD_INJECTOR_FILENAMES="AGENTS.md,CLAUDE.md"
 export AGENTS_MD_INJECTOR_MAX_TOTAL_BYTES=16384
 ```
 
-When a file is truncated, the injected block ends with a visible marker so the model knows
-content was cut:
+When a file is truncated — by the per-file cap or by the total injected budget — the block
+ends with a visible marker so the model knows content was cut:
 
 ```
 [agents-md-injector: 8123 bytes truncated from AGENTS.md]
