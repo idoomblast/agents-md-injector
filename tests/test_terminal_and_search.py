@@ -385,6 +385,23 @@ def test_symlinked_search_anchor_without_git_is_not_injected(injector, tmp_path)
     assert key not in injector._last_seen
 
 
+def test_search_result_in_other_repo_is_not_injected(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    other = tmp_path / "other_repo"
+    other.mkdir()
+    (other / ".git").mkdir()
+    (other / "AGENTS.md").write_text("other rules", encoding="utf-8")
+    (other / "app.py").write_text("app", encoding="utf-8")
+    result = json.dumps({"matches": [{"path": str(other / "app.py")}]})
+
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is None or "other rules" not in output
+    key = str((other / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
+
+
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     (repo / "src" / "AGENTS.md").write_text("src rules", encoding="utf-8")

@@ -350,6 +350,15 @@ def _find_origin_git_root(start: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _anchor_trust_root(anchor: Path) -> Path:
+    """Return the lexical trust boundary for a search anchor."""
+    origin = _find_origin_git_root(anchor)
+    if origin is not None:
+        return origin
+    first = _first_symlink_component(anchor)
+    return first.parent if first is not None else anchor
+
+
 def _resolve_from(value: Any, base: Path) -> Optional[Path]:
     try:
         text = os.fspath(value)
@@ -695,7 +704,12 @@ def _on_transform_tool_result(
                 working_dir,
                 _env_count(MAX_SEARCH_DIRS_ENV, DEFAULT_MAX_SEARCH_DIRS),
             )
-            targets.extend((directory, True) for directory in refined)
+            anchor_trust = _anchor_trust_root(anchor)
+            targets.extend(
+                (directory, True)
+                for directory in refined
+                if _is_inside(directory, anchor_trust)
+            )
         chunks: List[str] = []
         if tool_name == "search_files":
             for path in _search_result_paths(result, anchor, working_dir):
@@ -707,10 +721,7 @@ def _on_transform_tool_result(
                     resolved = path.resolve()
                 except OSError:
                     continue
-                trust_root = _find_origin_git_root(path.parent)
-                if trust_root is None:
-                    first = _first_symlink_component(anchor)
-                    trust_root = first.parent if first is not None else anchor
+                trust_root = _anchor_trust_root(anchor)
                 if not _is_inside(resolved, trust_root):
                     continue
                 if _read_blocked(resolved):
