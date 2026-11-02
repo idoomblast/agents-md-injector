@@ -243,9 +243,9 @@ def resolve_read_path(filepath: str) -> Optional[Path]:
 
 
 def _working_dir() -> Path:
-    """Resolve the session terminal cwd used for relative paths and core gating."""
+    """Return the session terminal cwd without resolving symlinks."""
     base = Path(os.environ.get("TERMINAL_CWD") or os.getcwd()).expanduser()
-    return base.resolve()
+    return Path(os.path.abspath(str(base)))
 
 
 def core_hints_active(working_dir: Path) -> bool:
@@ -677,7 +677,9 @@ def _on_transform_tool_result(
 
         else:
             anchor_value = args.get("path", ".")
-            anchor = _resolve_from(anchor_value, working_dir)
+            anchor = _lexical_from(anchor_value, working_dir)
+            if anchor is None or not anchor.exists():
+                anchor = _resolve_from(anchor_value, working_dir)
             if anchor is None:
                 anchor = working_dir
             if anchor.is_file():

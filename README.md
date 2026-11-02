@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.13 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.14 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 

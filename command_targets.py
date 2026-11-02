@@ -644,7 +644,11 @@ def extract_terminal_targets(
     ``working_dir`` is the session terminal cwd. ``workdir`` is the tool call's
     optional cwd override. A result cwd is used only if no cd/pushd occurs.
     """
-    base = _resolve(os.fspath(workdir), working_dir) if workdir else working_dir.resolve()
+    base = (
+        _resolve(os.fspath(workdir), working_dir)
+        if workdir
+        else Path(os.path.abspath(str(working_dir)))
+    )
     try:
         tokens = _shell_tokens(_normalize_heredoc_dash(_strip_heredocs(command)))
     except (ValueError, OSError):

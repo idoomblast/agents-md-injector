@@ -294,6 +294,49 @@ def test_parent_symlink_external_repo_is_not_injected(injector, tmp_path, monkey
         assert key not in injector._last_seen
 
 
+def test_symlinked_working_dir_relative_targets_not_injected(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / "AGENTS.md").write_text("outside rules", encoding="utf-8")
+    (outside / "subdir").mkdir()
+    (outside / "subdir" / "app.py").write_text("app", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("TERMINAL_CWD", str(repo / "linked" / "subdir"))
+
+    for name, args in (
+        ("read_file", {"path": "app.py"}),
+        ("terminal", {"command": "cat app.py"}),
+    ):
+        output = hook(injector, name, args, "raw")
+        assert output is None or "outside rules" not in output
+        key = str((outside / "AGENTS.md").resolve())
+        assert all(key not in paths for paths in injector._injected.values())
+        assert key not in injector._last_seen
+
+
+def test_symlinked_search_anchor_is_not_injected(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / "AGENTS.md").write_text("outside rules", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+
+    output = hook(
+        injector,
+        "search_files",
+        {"path": str(repo / "linked")},
+        json.dumps({"matches": []}),
+    )
+
+    assert output is None or "outside rules" not in output
+    key = str((outside / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
+
+
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     (repo / "src" / "AGENTS.md").write_text("src rules", encoding="utf-8")
