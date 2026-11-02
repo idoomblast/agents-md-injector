@@ -188,25 +188,32 @@ def _deactivate(session_key: str) -> None:
         _trim_locked()
 
 
-def _reserve(cache: Set[str], key: str) -> bool:
+def _reserve(cache: Set[str], key: str, claim_log: Optional[List[str]] = None) -> bool:
     """Atomically claim *key*; False when it was already claimed."""
     with _injected_lock:
         if key in cache:
             return False
         cache.add(key)
+        if claim_log is not None:
+            claim_log.append(key)
         return True
 
 
-def _release(cache: Set[str], key: str) -> None:
+def _release(cache: Set[str], key: str, claim_log: Optional[List[str]] = None) -> None:
     """Give a reservation back so a later call may retry the read."""
     with _injected_lock:
         cache.discard(key)
+    if claim_log is not None and key in claim_log:
+        claim_log.remove(key)
 
 
-def _mark_seen(cache: Set[str], key: str) -> None:
+def _mark_seen(cache: Set[str], key: str, claim_log: Optional[List[str]] = None) -> None:
     """Record a path as handled without claiming it for a read."""
     with _injected_lock:
+        added = key not in cache
         cache.add(key)
+    if claim_log is not None and added:
+        claim_log.append(key)
 
 
 def reset_cache(session_key: Optional[str] = None) -> None:
@@ -339,6 +346,7 @@ def _find_origin_git_root(start: Path) -> Optional[Path]:
     A symlinked directory inside a repository must not establish a new trusted
     root: only ancestors above the first symlink component are eligible.
     """
+    start = _lexical_normalize(start)
     first = _first_symlink_component(start)
     current = start
     while True:
@@ -364,6 +372,7 @@ def _within_trust(path: Path, trust: Path) -> bool:
 
 def _anchor_trust_root(anchor: Path) -> Path:
     """Return the normalized lexical trust boundary for a search anchor."""
+    anchor = _lexical_normalize(anchor)
     origin = _find_origin_git_root(anchor)
     if origin is not None:
         return _lexical_normalize(origin)
@@ -494,6 +503,8 @@ def collect_instruction_chunks(
     max_file_bytes: Optional[int] = None,
     max_total_bytes: Optional[int] = None,
     start_at_directory: bool = False,
+    trust_root: Optional[Path] = None,
+    claim_log: Optional[List[str]] = None,
 ) -> List[str]:
     """Collect "Instructions from: <path>" chunks for *path*.
 
@@ -516,11 +527,17 @@ def collect_instruction_chunks(
     chunks: List[str] = []
     used = 0
 
-    start = path if start_at_directory else path.parent
+    start = _lexical_normalize(path if start_at_directory else path.parent)
     if not start.exists():
         return chunks
 
-    git_root = _find_origin_git_root(start)
+    if trust_root is not None:
+        trust_root = _lexical_normalize(trust_root)
+        if not _within_trust(start, trust_root):
+            return chunks
+        git_root = trust_root
+    else:
+        git_root = _find_origin_git_root(start)
     current = start
     while True:
         for name in names:
@@ -535,7 +552,7 @@ def collect_instruction_chunks(
             key = str(resolved)
             if total_budget and used >= total_budget:
                 return chunks
-            if not _reserve(cache, key):
+            if not _reserve(cache, key, claim_log):
                 continue
 
             # A symlinked instruction file (or a symlinked parent directory)
@@ -547,18 +564,18 @@ def collect_instruction_chunks(
             if git_root is not None:
                 if not _is_inside(resolved, git_root):
                     logger.debug("Ignoring out-of-tree instruction target %s -> %s", candidate, resolved)
-                    _release(cache, key)
+                    _release(cache, key, claim_log)
                     continue
             elif _has_symlink_component(candidate, start):
                 first = _first_symlink_component(start)
                 boundary = first.parent if first is not None else start
                 if not _is_inside(resolved, boundary):
                     logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
-                    _release(cache, key)
+                    _release(cache, key, claim_log)
                     continue
             if _read_blocked(resolved):
                 logger.debug("Ignoring sensitive instruction target %s", resolved)
-                _release(cache, key)
+                _release(cache, key, claim_log)
                 continue
 
             limit = per_file
@@ -569,13 +586,13 @@ def collect_instruction_chunks(
                 content, omitted = _read_text_limited(resolved, limit)
             except OSError as exc:
                 logger.debug("Could not read %s: %s", resolved, exc)
-                _release(cache, key)
+                _release(cache, key, claim_log)
                 continue
 
             if not content:
                 # Nothing to inject: release the reservation so a later call
                 # can inject once the file actually has instructions.
-                _release(cache, key)
+                _release(cache, key, claim_log)
                 continue
 
             # Reading the instruction file itself: its content is already the
@@ -598,7 +615,7 @@ def collect_instruction_chunks(
             if total_budget:
                 remaining = total_budget - used
                 if remaining <= SEPARATOR_BYTES + header_bytes:
-                    _release(cache, key)
+                    _release(cache, key, claim_log)
                     return chunks
                 max_chunk_bytes = remaining - SEPARATOR_BYTES
                 content_bytes = content.encode("utf-8")
@@ -619,7 +636,7 @@ def collect_instruction_chunks(
                     marker = _marker(omitted)
                     content_bytes = trimmed_bytes
                 if content_budget <= 0 or not content_bytes:
-                    _release(cache, key)
+                    _release(cache, key, claim_log)
                     continue
                 content = content_bytes.decode("utf-8", "ignore")
                 chunk = header + content + marker
@@ -627,7 +644,7 @@ def collect_instruction_chunks(
                     # The marker grew after the final trim; shrinking content
                     # again would make the marker's count stale. Omit the
                     # chunk rather than emit silently incomplete instructions.
-                    _release(cache, key)
+                    _release(cache, key, claim_log)
                     continue
             else:
                 chunk = header + content + marker
@@ -635,6 +652,8 @@ def collect_instruction_chunks(
             used += len(chunk.encode("utf-8")) + SEPARATOR_BYTES
 
         if git_root is not None and current == git_root:
+            break
+        if trust_root is not None and current == trust_root:
             break
         if current.parent == current:  # filesystem root
             break
@@ -664,6 +683,7 @@ def _on_transform_tool_result(
 
     session_key = _session_key(kwargs)
     _activate(session_key)
+    claim_log: List[str] = []
     try:
         working_dir = _working_dir()
         targets: List[Tuple[Path, bool]] = []
@@ -742,7 +762,11 @@ def _on_transform_tool_result(
                 except OSError:
                     continue
                 if content:
-                    _mark_seen(_session_cache(session_key), str(resolved))
+                    _mark_seen(
+                        _session_cache(session_key),
+                        str(resolved),
+                        claim_log=claim_log,
+                    )
         total_budget = _env_bytes(MAX_TOTAL_ENV, DEFAULT_MAX_TOTAL_BYTES)
         total_used = 0
         for path, is_directory in targets:
@@ -758,6 +782,8 @@ def _on_transform_tool_result(
                 session_key=session_key,
                 start_at_directory=is_directory,
                 max_total_bytes=(total_budget - total_used) if total_budget else None,
+                trust_root=anchor_trust if tool_name == "search_files" else None,
+                claim_log=claim_log,
             )
             chunks.extend(new_chunks)
             total_used += sum(
@@ -765,6 +791,13 @@ def _on_transform_tool_result(
             )
     except Exception as exc:  # never break a tool call because of this plugin
         logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
+        try:
+            cache = _session_cache(session_key)
+        except Exception:
+            cache = None
+        if cache is not None:
+            for key in list(claim_log):
+                _release(cache, key, claim_log)
         return None
     finally:
         _deactivate(session_key)

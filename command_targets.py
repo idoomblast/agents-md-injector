@@ -84,6 +84,32 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
         if char == "\\":
             index += 2
             continue
+        if line.startswith("<<<", index):
+            # Here-string: consume the whole operator and its operand so the
+            # remaining ``<<`` cannot be mistaken for a heredoc marker.
+            cursor = index + 3
+            while cursor < len(line) and line[cursor] in " \t":
+                cursor += 1
+            operand_quote = ""
+            while cursor < len(line):
+                current = line[cursor]
+                if operand_quote:
+                    if current == "\\" and operand_quote == '"':
+                        cursor += 2
+                        continue
+                    if current == operand_quote:
+                        operand_quote = ""
+                    cursor += 1
+                    continue
+                if current in {"'", '"'}:
+                    operand_quote = current
+                    cursor += 1
+                    continue
+                if current.isspace() or current in ";|&<>()":
+                    break
+                cursor += 1
+            index = cursor
+            continue
         if char == "<" and line.startswith("<<", index) and not line.startswith("<<<", index):
             cursor = index + 2
             strip_tabs = cursor < len(line) and line[cursor] == "-"

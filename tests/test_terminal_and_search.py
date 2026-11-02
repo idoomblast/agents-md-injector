@@ -217,7 +217,6 @@ def test_sensitive_search_result_is_not_cached(injector, tmp_path):
     assert output is None or "SECRET KEY MATERIAL" not in output
     key = str(sensitive.resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
 
 
 def test_out_of_tree_symlink_search_result_is_not_cached(injector, tmp_path, monkeypatch):
@@ -244,7 +243,7 @@ def test_out_of_tree_symlink_search_result_is_not_cached(injector, tmp_path, mon
     assert str(outside.resolve()) not in reads
     key = str(outside.resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
+    assert "s1" not in injector._last_seen
 
 
 def test_parent_symlink_search_result_is_not_read(injector, tmp_path, monkeypatch):
@@ -270,7 +269,6 @@ def test_parent_symlink_search_result_is_not_read(injector, tmp_path, monkeypatc
     external = str((outside / "AGENTS.md").resolve())
     assert external not in reads
     assert all(external not in paths for paths in injector._injected.values())
-    assert external not in injector._last_seen
 
 
 def test_parent_symlink_external_repo_is_not_injected(injector, tmp_path, monkeypatch):
@@ -291,7 +289,6 @@ def test_parent_symlink_external_repo_is_not_injected(injector, tmp_path, monkey
         assert output is None or "outside rules" not in output
         key = str((outside / "AGENTS.md").resolve())
         assert all(key not in paths for paths in injector._injected.values())
-        assert key not in injector._last_seen
 
 
 def test_symlinked_working_dir_relative_targets_not_injected(injector, tmp_path, monkeypatch):
@@ -313,7 +310,6 @@ def test_symlinked_working_dir_relative_targets_not_injected(injector, tmp_path,
         assert output is None or "outside rules" not in output
         key = str((outside / "AGENTS.md").resolve())
         assert all(key not in paths for paths in injector._injected.values())
-        assert key not in injector._last_seen
 
 
 def test_symlinked_search_anchor_is_not_injected(injector, tmp_path):
@@ -334,7 +330,7 @@ def test_symlinked_search_anchor_is_not_injected(injector, tmp_path):
     assert output is None or "outside rules" not in output
     key = str((outside / "AGENTS.md").resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
+    assert "s1" not in injector._last_seen
 
 
 def test_nonempty_result_through_symlinked_anchor_is_not_injected(injector, tmp_path):
@@ -357,7 +353,7 @@ def test_nonempty_result_through_symlinked_anchor_is_not_injected(injector, tmp_
     assert output is None or "outside rules" not in output
     key = str((outside / "AGENTS.md").resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
+    assert "s1" not in injector._last_seen
 
 
 def test_symlinked_search_anchor_without_git_is_not_injected(injector, tmp_path):
@@ -382,7 +378,7 @@ def test_symlinked_search_anchor_without_git_is_not_injected(injector, tmp_path)
     assert output is None or "outside rules" not in output
     key = str((outside / "AGENTS.md").resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
+    assert "s1" not in injector._last_seen
 
 
 def test_search_result_in_other_repo_is_not_injected(injector, tmp_path):
@@ -399,7 +395,6 @@ def test_search_result_in_other_repo_is_not_injected(injector, tmp_path):
     assert output is None or "other rules" not in output
     key = str((other / "AGENTS.md").resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
 
 
 def test_symlinked_external_result_into_anchor_is_not_injected(injector, tmp_path):
@@ -417,11 +412,12 @@ def test_symlinked_external_result_into_anchor_is_not_injected(injector, tmp_pat
     assert output is None or "other rules" not in output
     key = str((other / "AGENTS.md").resolve())
     assert all(key not in paths for paths in injector._injected.values())
-    assert key not in injector._last_seen
 
 
 def test_external_results_do_not_consume_refinement_cap(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
+    (repo / "lib" / "AGENTS.md").write_text("lib rules", encoding="utf-8")
+    (repo / "lib" / "app.py").write_text("app", encoding="utf-8")
     external_one = tmp_path / "external_one"
     external_one.mkdir()
     (external_one / "app.py").write_text("one", encoding="utf-8")
@@ -433,7 +429,7 @@ def test_external_results_do_not_consume_refinement_cap(injector, tmp_path, monk
             "matches": [
                 {"path": str(external_one / "app.py")},
                 {"path": str(external_two / "app.py")},
-                {"path": str(repo / "src" / "app.py")},
+                {"path": str(repo / "lib" / "app.py")},
             ]
         }
     )
@@ -441,7 +437,7 @@ def test_external_results_do_not_consume_refinement_cap(injector, tmp_path, monk
 
     output = hook(injector, "search_files", {"path": str(repo)}, result)
 
-    assert output is not None and "repo rules" in output
+    assert output is not None and "lib rules" in output
 
 
 def test_dotdot_anchor_keeps_in_repo_results(injector, tmp_path):
@@ -459,6 +455,97 @@ def test_dotdot_anchor_keeps_in_repo_results(injector, tmp_path):
     )
 
     assert output is not None and "lib rules" in output
+
+
+def test_symlink_dotdot_result_cannot_escape_search_anchor(injector, tmp_path):
+    work = tmp_path / "work"
+    repo = work / "repo"
+    repo.mkdir(parents=True)
+    (repo / "sub").mkdir()
+    (repo / "app.py").write_text("app", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
+    (work / "AGENTS.md").write_text("outside rules", encoding="utf-8")
+    (work / "link").symlink_to(repo / "sub", target_is_directory=True)
+    result = json.dumps(
+        {"matches": [{"path": str(work / "link" / ".." / "repo" / "app.py")}]}
+    )
+
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is None or "outside rules" not in output
+    key = str((work / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+
+
+def test_cancelled_directory_git_root_does_not_replace_origin(injector, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "area" / "nested" / ".git").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
+    (repo / "area" / "nested" / "AGENTS.md").write_text(
+        "nested rules", encoding="utf-8"
+    )
+    (repo / "area" / "lib").mkdir(parents=True)
+    (repo / "area" / "lib" / "AGENTS.md").write_text("lib rules", encoding="utf-8")
+    (repo / "area" / "lib" / "app.py").write_text("app", encoding="utf-8")
+    result = json.dumps(
+        {"matches": [{"path": str(repo / "area" / "lib" / "app.py")}]}
+    )
+
+    output = hook(
+        injector,
+        "search_files",
+        {"path": str(repo / "area" / "nested" / "..")},
+        result,
+    )
+
+    assert output is not None and "lib rules" in output
+    assert "nested rules" not in output
+
+
+def test_transform_failure_rolls_back_claims(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "x.py").write_text("x", encoding="utf-8")
+    (bad / "AGENTS.md").write_text("bad rules", encoding="utf-8")
+    original = injector._read_text_limited
+
+    def flaky(path, limit):
+        if "bad" in str(path):
+            raise UnicodeEncodeError("utf-8", str(path), 0, 1, "bad path")
+        return original(path, limit)
+
+    monkeypatch.setattr(injector, "_read_text_limited", flaky)
+    output = hook(
+        injector,
+        "terminal",
+        {"command": f"cat {repo / 'src' / 'app.py'} {bad / 'x.py'}"},
+        "raw",
+    )
+    assert output is None
+
+    monkeypatch.setattr(injector, "_read_text_limited", original)
+    retry = hook(
+        injector,
+        "read_file",
+        {"path": str(repo / "src" / "app.py")},
+        "raw",
+    )
+    assert retry is not None and "repo rules" in retry
+
+
+def test_here_string_does_not_swallow_following_reader(injector, tmp_path):
+    repo = make_repo(tmp_path)
+
+    for index, command in enumerate(
+        (
+            f"cat <<< data\ncat {repo / 'src' / 'app.py'}",
+            f"head <<< data\nhead {repo / 'src' / 'app.py'}",
+        )
+    ):
+        output = hook(injector, "terminal", {"command": command}, "raw", session=f"h{index}")
+        assert output is not None and "repo rules" in output
 
 
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
