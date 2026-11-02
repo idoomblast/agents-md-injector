@@ -25,7 +25,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Set, Tuple
+from typing import Any, Iterable, List, Optional, Sequence, Set, Tuple
 
 if __package__:
     from .command_targets import extract_terminal_targets
@@ -53,6 +53,8 @@ DEFAULT_MAX_SEARCH_DIRS = 5
 
 # Session key -> canonical paths already injected in that session.
 _injected: dict[str, Set[str]] = {}
+# Session key -> paths whose delivery was committed by a successful transform.
+_committed: dict[str, Set[str]] = {}
 _injected_lock = threading.Lock()
 # Sessions with a transform in flight; their cache must not be evicted.
 _active_sessions: dict[str, int] = {}
@@ -137,6 +139,7 @@ def _trim_locked(now: Optional[float] = None) -> None:
             return
         del _injected[victim]
         _last_seen.pop(victim, None)
+        _committed.pop(victim, None)
 
 
 def _session_cache(session_key: str) -> Set[str]:
@@ -154,6 +157,7 @@ def _session_cache(session_key: str) -> Set[str]:
                     ):
                         del _injected[victim]
                         _last_seen.pop(victim, None)
+                        _committed.pop(victim, None)
                         break
             cache = _injected[session_key] = set()
         _last_seen[session_key] = time.monotonic()
@@ -179,12 +183,15 @@ def _deactivate(session_key: str) -> None:
         cache = _injected.get(session_key)
         if cache is None:
             _last_seen.pop(session_key, None)
+            _committed.pop(session_key, None)
         elif not cache:
             # A call that found no instruction file must not leave metadata.
             del _injected[session_key]
             _last_seen.pop(session_key, None)
+            _committed.pop(session_key, None)
         else:
             _last_seen[session_key] = time.monotonic()
+            _committed[session_key] = _committed.get(session_key, set()) & cache
         _trim_locked()
 
 
@@ -199,21 +206,50 @@ def _reserve(cache: Set[str], key: str, claim_log: Optional[List[str]] = None) -
         return True
 
 
-def _release(cache: Set[str], key: str, claim_log: Optional[List[str]] = None) -> None:
-    """Give a reservation back so a later call may retry the read."""
+def _release(
+    cache: Set[str],
+    key: str,
+    claim_log: Optional[List[str]] = None,
+    session_key: str = "",
+) -> None:
+    """Give a reservation back, unless a concurrent call already delivered it."""
     with _injected_lock:
-        cache.discard(key)
+        if session_key and key in _committed.get(session_key, set()):
+            keep = True
+        else:
+            cache.discard(key)
+            keep = False
     if claim_log is not None and key in claim_log:
         claim_log.remove(key)
+    if keep:
+        logger.debug("Keeping committed instruction claim for %s", key)
 
 
-def _mark_seen(cache: Set[str], key: str, claim_log: Optional[List[str]] = None) -> None:
+def _commit(session_key: str, keys: Iterable[str]) -> None:
+    """Mark *keys* as delivered so rollback cannot remove their dedupe state."""
+    with _injected_lock:
+        _committed.setdefault(session_key, set()).update(keys)
+
+
+def _note(log: Optional[List[str]], key: str) -> None:
+    if log is not None and key not in log:
+        log.append(key)
+
+
+def _mark_seen(
+    cache: Set[str],
+    key: str,
+    claim_log: Optional[List[str]] = None,
+    seen_log: Optional[List[str]] = None,
+) -> None:
     """Record a path as handled without claiming it for a read."""
     with _injected_lock:
         added = key not in cache
         cache.add(key)
     if claim_log is not None and added:
         claim_log.append(key)
+    if seen_log is not None:
+        _note(seen_log, key)
 
 
 def reset_cache(session_key: Optional[str] = None) -> None:
@@ -223,9 +259,11 @@ def reset_cache(session_key: Optional[str] = None) -> None:
             _injected.clear()
             _active_sessions.clear()
             _last_seen.clear()
+            _committed.clear()
         else:
             _injected.pop(session_key, None)
             _last_seen.pop(session_key, None)
+            _committed.pop(session_key, None)
 
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -286,8 +324,12 @@ def _core_should_skip(target_dir: Path, working_dir: Path) -> bool:
         return False
     if not _is_inside(target_dir, working_dir):
         return False
+    target_dir = _lexical_normalize(target_dir)
     repo_root = find_git_root(target_dir)
-    return repo_root is not None and repo_root == working_dir.resolve()
+    return (
+        repo_root is not None
+        and _lexical_normalize(repo_root) == _lexical_normalize(working_dir.resolve())
+    )
 
 
 def _lexical_from(value: Any, base: Path) -> Optional[Path]:
@@ -505,6 +547,7 @@ def collect_instruction_chunks(
     start_at_directory: bool = False,
     trust_root: Optional[Path] = None,
     claim_log: Optional[List[str]] = None,
+    commit_log: Optional[List[str]] = None,
 ) -> List[str]:
     """Collect "Instructions from: <path>" chunks for *path*.
 
@@ -553,6 +596,8 @@ def collect_instruction_chunks(
             if total_budget and used >= total_budget:
                 return chunks
             if not _reserve(cache, key, claim_log):
+                if commit_log is not None and resolved == path.resolve():
+                    _note(commit_log, key)
                 continue
 
             # A symlinked instruction file (or a symlinked parent directory)
@@ -564,18 +609,18 @@ def collect_instruction_chunks(
             if git_root is not None:
                 if not _is_inside(resolved, git_root):
                     logger.debug("Ignoring out-of-tree instruction target %s -> %s", candidate, resolved)
-                    _release(cache, key, claim_log)
+                    _release(cache, key, claim_log, session_key)
                     continue
             elif _has_symlink_component(candidate, start):
                 first = _first_symlink_component(start)
                 boundary = first.parent if first is not None else start
                 if not _is_inside(resolved, boundary):
                     logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
-                    _release(cache, key, claim_log)
+                    _release(cache, key, claim_log, session_key)
                     continue
             if _read_blocked(resolved):
                 logger.debug("Ignoring sensitive instruction target %s", resolved)
-                _release(cache, key, claim_log)
+                _release(cache, key, claim_log, session_key)
                 continue
 
             limit = per_file
@@ -586,13 +631,13 @@ def collect_instruction_chunks(
                 content, omitted = _read_text_limited(resolved, limit)
             except OSError as exc:
                 logger.debug("Could not read %s: %s", resolved, exc)
-                _release(cache, key, claim_log)
+                _release(cache, key, claim_log, session_key)
                 continue
 
             if not content:
                 # Nothing to inject: release the reservation so a later call
                 # can inject once the file actually has instructions.
-                _release(cache, key, claim_log)
+                _release(cache, key, claim_log, session_key)
                 continue
 
             # Reading the instruction file itself: its content is already the
@@ -600,6 +645,8 @@ def collect_instruction_chunks(
             # the file actually has content; an empty self-read is released
             # above so a later call can inject it once populated.
             if resolved == path.resolve():
+                if commit_log is not None:
+                    _note(commit_log, key)
                 continue
 
             header = f"Instructions from: {resolved}\n"
@@ -615,7 +662,7 @@ def collect_instruction_chunks(
             if total_budget:
                 remaining = total_budget - used
                 if remaining <= SEPARATOR_BYTES + header_bytes:
-                    _release(cache, key, claim_log)
+                    _release(cache, key, claim_log, session_key)
                     return chunks
                 max_chunk_bytes = remaining - SEPARATOR_BYTES
                 content_bytes = content.encode("utf-8")
@@ -636,7 +683,7 @@ def collect_instruction_chunks(
                     marker = _marker(omitted)
                     content_bytes = trimmed_bytes
                 if content_budget <= 0 or not content_bytes:
-                    _release(cache, key, claim_log)
+                    _release(cache, key, claim_log, session_key)
                     continue
                 content = content_bytes.decode("utf-8", "ignore")
                 chunk = header + content + marker
@@ -644,7 +691,7 @@ def collect_instruction_chunks(
                     # The marker grew after the final trim; shrinking content
                     # again would make the marker's count stale. Omit the
                     # chunk rather than emit silently incomplete instructions.
-                    _release(cache, key, claim_log)
+                    _release(cache, key, claim_log, session_key)
                     continue
             else:
                 chunk = header + content + marker
@@ -684,6 +731,7 @@ def _on_transform_tool_result(
     session_key = _session_key(kwargs)
     _activate(session_key)
     claim_log: List[str] = []
+    commit_log: List[str] = []
     try:
         working_dir = _working_dir()
         targets: List[Tuple[Path, bool]] = []
@@ -766,6 +814,7 @@ def _on_transform_tool_result(
                         _session_cache(session_key),
                         str(resolved),
                         claim_log=claim_log,
+                        seen_log=commit_log,
                     )
         total_budget = _env_bytes(MAX_TOTAL_ENV, DEFAULT_MAX_TOTAL_BYTES)
         total_used = 0
@@ -784,11 +833,13 @@ def _on_transform_tool_result(
                 max_total_bytes=(total_budget - total_used) if total_budget else None,
                 trust_root=anchor_trust if tool_name == "search_files" else None,
                 claim_log=claim_log,
+                commit_log=commit_log,
             )
             chunks.extend(new_chunks)
             total_used += sum(
                 len(chunk.encode("utf-8")) + SEPARATOR_BYTES for chunk in new_chunks
             )
+        _commit(session_key, [*claim_log, *commit_log])
     except Exception as exc:  # never break a tool call because of this plugin
         logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
         try:
@@ -797,7 +848,7 @@ def _on_transform_tool_result(
             cache = None
         if cache is not None:
             for key in list(claim_log):
-                _release(cache, key, claim_log)
+                _release(cache, key, claim_log, session_key)
         return None
     finally:
         _deactivate(session_key)

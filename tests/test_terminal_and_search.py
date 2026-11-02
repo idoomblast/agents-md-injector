@@ -1,6 +1,7 @@
 """Integration tests for terminal and native search_files injection."""
 
 import json
+import threading
 
 
 def make_repo(root, *, instructions=True):
@@ -457,22 +458,36 @@ def test_dotdot_anchor_keeps_in_repo_results(injector, tmp_path):
     assert output is not None and "lib rules" in output
 
 
-def test_symlink_dotdot_result_cannot_escape_search_anchor(injector, tmp_path):
+def test_symlink_dotdot_result_cannot_escape_search_anchor(injector, tmp_path, monkeypatch):
     work = tmp_path / "work"
     repo = work / "repo"
     repo.mkdir(parents=True)
     (repo / "sub").mkdir()
-    (repo / "app.py").write_text("app", encoding="utf-8")
+    (repo / "lib").mkdir()
+    (repo / "lib" / "app.py").write_text("app", encoding="utf-8")
+    (repo / "lib" / "AGENTS.md").write_text("lib rules", encoding="utf-8")
+    (repo / "repo" / "lib").mkdir(parents=True)
+    (repo / "repo" / "lib" / "app.py").write_text("app", encoding="utf-8")
     (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
     (work / "AGENTS.md").write_text("outside rules", encoding="utf-8")
     (work / "link").symlink_to(repo / "sub", target_is_directory=True)
-    result = json.dumps(
-        {"matches": [{"path": str(work / "link" / ".." / "repo" / "app.py")}]}
-    )
+    result_path = work / "link" / ".." / "repo" / "lib" / "app.py"
+    assert result_path.resolve() == (repo / "repo" / "lib" / "app.py").resolve()
+    result = json.dumps({"matches": [{"path": str(result_path)}]})
 
+    reads = []
+    original = injector._read_text_limited
+
+    def spy(path, limit):
+        reads.append(str(path))
+        return original(path, limit)
+
+    monkeypatch.setattr(injector, "_read_text_limited", spy)
     output = hook(injector, "search_files", {"path": str(repo)}, result)
 
-    assert output is None or "outside rules" not in output
+    assert output is not None and "lib rules" in output
+    assert "outside rules" not in output
+    assert str((work / "AGENTS.md").resolve()) not in reads
     key = str((work / "AGENTS.md").resolve())
     assert all(key not in paths for paths in injector._injected.values())
 
@@ -546,6 +561,135 @@ def test_here_string_does_not_swallow_following_reader(injector, tmp_path):
     ):
         output = hook(injector, "terminal", {"command": command}, "raw", session=f"h{index}")
         assert output is not None and "repo rules" in output
+
+
+def test_newline_separates_commands(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    positive = hook(
+        injector,
+        "terminal",
+        {"command": f"printf data\ncat {repo / 'src' / 'app.py'}"},
+        "raw",
+        session="n-positive",
+    )
+    assert positive is not None and "repo rules" in positive
+
+    negative = hook(
+        injector,
+        "terminal",
+        {"command": f"cat <<< data\nprintf {repo / 'src' / 'app.py'}"},
+        "raw",
+        session="n-negative",
+    )
+    assert negative is None or "repo rules" not in negative
+
+    changed_cwd = hook(
+        injector,
+        "terminal",
+        {"command": "cd repo\ncat src/app.py"},
+        "raw",
+        session="n-cwd",
+    )
+    assert changed_cwd is not None and "repo rules" in changed_cwd
+
+
+def test_here_string_escaped_quote_does_not_hide_heredoc(injector, tmp_path):
+    repo = make_repo(tmp_path)
+
+    for index, escaped in enumerate(("\\'", '\\"')):
+        command = (
+            f"cat <<< x{escaped} <<EOF\n"
+            f"cat {repo / 'src' / 'app.py'}\n"
+            "EOF"
+        )
+        output = hook(
+            injector,
+            "terminal",
+            {"command": command},
+            "raw",
+            session=f"escape-{index}",
+        )
+        assert output is None or "repo rules" not in output
+
+
+def test_committed_delivery_survives_owner_rollback(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "x.py").write_text("x", encoding="utf-8")
+    (bad / "AGENTS.md").write_text("bad rules", encoding="utf-8")
+    original = injector._read_text_limited
+    paused = threading.Event()
+    release = threading.Event()
+
+    def gated(path, limit):
+        if "bad" in str(path):
+            raise UnicodeEncodeError("utf-8", str(path), 0, 1, "bad path")
+        if str(path).endswith("repo/AGENTS.md") and not paused.is_set():
+            paused.set()
+            assert release.wait(5)
+        return original(path, limit)
+
+    monkeypatch.setattr(injector, "_read_text_limited", gated)
+    result: dict[str, object] = {}
+
+    def owner():
+        result["value"] = hook(
+            injector,
+            "terminal",
+            {"command": f"cat {repo / 'src' / 'app.py'} {bad / 'x.py'}"},
+            "raw",
+            session="s1",
+        )
+
+    worker = threading.Thread(target=owner)
+    worker.start()
+    assert paused.wait(5)
+
+    consumer = hook(
+        injector,
+        "search_files",
+        {"path": str(repo)},
+        json.dumps({"matches": [{"path": str(repo / "AGENTS.md")}]}),
+        session="s1",
+    )
+    assert consumer is None or "repo rules" not in consumer
+    release.set()
+    worker.join(5)
+    assert result.get("value") is None
+
+    monkeypatch.setattr(injector, "_read_text_limited", original)
+    retry = hook(
+        injector,
+        "read_file",
+        {"path": str(repo / "src" / "app.py")},
+        "raw",
+        session="s1",
+    )
+    assert retry is None or "repo rules" not in retry
+
+
+def test_core_coordination_uses_normalized_ancestry(injector, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
+    (repo / "area" / "nested" / ".git").mkdir(parents=True)
+    (repo / "area" / "nested" / "AGENTS.md").write_text(
+        "nested rules", encoding="utf-8"
+    )
+    (repo / "area" / "app.py").write_text("app", encoding="utf-8")
+    monkeypatch.setenv("TERMINAL_CWD", str(repo))
+
+    output = hook(
+        injector,
+        "read_file",
+        {"path": str(repo / "area" / "nested" / ".." / "app.py")},
+        "raw",
+    )
+
+    assert output is None or "repo rules" not in output
 
 
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):

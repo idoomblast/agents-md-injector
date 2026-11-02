@@ -101,6 +101,11 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
                         operand_quote = ""
                     cursor += 1
                     continue
+                if current == "\\":
+                    # An unquoted backslash escapes the next character, so an
+                    # escaped quote must not open quote state.
+                    cursor += 2
+                    continue
                 if current in {"'", '"'}:
                     operand_quote = current
                     cursor += 1
@@ -228,6 +233,47 @@ def _resolve(path: str, cwd: Path) -> Path:
     if not value.is_absolute():
         value = cwd / value
     return Path(os.path.abspath(str(value)))
+
+
+def _normalize_newlines(command: str) -> str:
+    """Turn unquoted newlines into command separators.
+
+    ``shlex`` treats a newline as ordinary whitespace, which would merge
+    newline-separated commands into one argv. Quoted newlines are preserved; a
+    backslash-newline is a line continuation and is removed entirely.
+    """
+    result: List[str] = []
+    index = 0
+    quote = ""
+    while index < len(command):
+        char = command[index]
+        if quote:
+            result.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(command):
+                result.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            result.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(command):
+            if command[index + 1] != "\n":
+                result.append(command[index:index + 2])
+            index += 2
+            continue
+        if char == "\n":
+            result.append(" ; ")
+            index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
 
 
 def _shell_tokens(command: str) -> List[str]:
@@ -676,7 +722,9 @@ def extract_terminal_targets(
         else Path(os.path.abspath(str(working_dir)))
     )
     try:
-        tokens = _shell_tokens(_normalize_heredoc_dash(_strip_heredocs(command)))
+        tokens = _shell_tokens(
+            _normalize_heredoc_dash(_normalize_newlines(_strip_heredocs(command)))
+        )
     except (ValueError, OSError):
         return []
     segments = _segments(tokens)
