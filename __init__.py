@@ -312,6 +312,44 @@ def _has_symlink_component(path: Path, stop: Path) -> bool:
         current = current.parent
 
 
+def _first_symlink_component(path: Path) -> Optional[Path]:
+    """Return the first symlink encountered while walking *path* top-down."""
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return current
+        except OSError:
+            return current
+    return None
+
+
+def _is_within_lexical(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _find_origin_git_root(start: Path) -> Optional[Path]:
+    """Find the git root of the lexical path, ignoring .git reached via symlinks.
+
+    A symlinked directory inside a repository must not establish a new trusted
+    root: only ancestors above the first symlink component are eligible.
+    """
+    first = _first_symlink_component(start)
+    current = start
+    while True:
+        if not (first is not None and _is_within_lexical(current, first)):
+            if (current / ".git").exists():
+                return current
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
 def _resolve_from(value: Any, base: Path) -> Optional[Path]:
     try:
         text = os.fspath(value)
@@ -459,7 +497,7 @@ def collect_instruction_chunks(
     if not start.exists():
         return chunks
 
-    git_root = find_git_root(start)
+    git_root = _find_origin_git_root(start)
     current = start
     while True:
         for name in names:
@@ -616,6 +654,9 @@ def _on_transform_tool_result(
             path = resolve_read_path(filepath)
             if path is None or not path.parent.exists():
                 return None
+            lexical = _lexical_from(filepath, working_dir)
+            if lexical is not None and lexical.exists():
+                path = lexical
             targets.append((path, False))
 
         elif tool_name == "terminal":
@@ -661,7 +702,7 @@ def _on_transform_tool_result(
                     resolved = path.resolve()
                 except OSError:
                     continue
-                if not _is_inside(resolved, find_git_root(path.parent) or anchor):
+                if not _is_inside(resolved, _find_origin_git_root(path.parent) or anchor):
                     continue
                 if _read_blocked(resolved):
                     continue

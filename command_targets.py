@@ -201,7 +201,7 @@ def _resolve(path: str, cwd: Path) -> Path:
     value = Path(path).expanduser()
     if not value.is_absolute():
         value = cwd / value
-    return value.resolve()
+    return Path(os.path.abspath(str(value)))
 
 
 def _shell_tokens(command: str) -> List[str]:
@@ -601,7 +601,9 @@ def _glob_paths(value: str, cwd: Path) -> List[Path]:
     pattern_parts = parts[wildcard_index:]
     pattern = str(Path(*pattern_parts))
     try:
-        return sorted(path.resolve() for path in root.glob(pattern) if path.exists())
+        return sorted(
+            Path(os.path.abspath(str(path))) for path in root.glob(pattern) if path.exists()
+        )
     except (OSError, ValueError):
         return []
 
