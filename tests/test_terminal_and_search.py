@@ -444,6 +444,23 @@ def test_external_results_do_not_consume_refinement_cap(injector, tmp_path, monk
     assert output is not None and "repo rules" in output
 
 
+def test_dotdot_anchor_keeps_in_repo_results(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "lib" / "AGENTS.md").write_text("lib rules", encoding="utf-8")
+    (repo / "lib" / "app.py").write_text("app", encoding="utf-8")
+    result = json.dumps({"matches": [{"path": str(repo / "lib" / "app.py")}]})
+
+    output = hook(
+        injector,
+        "search_files",
+        {"path": str((repo / "src") / "..")},
+        result,
+    )
+
+    assert output is not None and "lib rules" in output
+
+
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     (repo / "src" / "AGENTS.md").write_text("src rules", encoding="utf-8")

@@ -350,18 +350,27 @@ def _find_origin_git_root(start: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _lexical_normalize(value: Path) -> Path:
+    """Collapse ``..`` without resolving symlinks."""
+    return Path(os.path.normpath(str(value)))
+
+
 def _within_trust(path: Path, trust: Path) -> bool:
     """True only when both the lexical path and its resolution stay in trust."""
-    return _is_within_lexical(path, trust) and _is_inside(path, trust)
+    return _is_within_lexical(
+        _lexical_normalize(path), _lexical_normalize(trust)
+    ) and _is_inside(path, trust)
 
 
 def _anchor_trust_root(anchor: Path) -> Path:
-    """Return the lexical trust boundary for a search anchor."""
+    """Return the normalized lexical trust boundary for a search anchor."""
     origin = _find_origin_git_root(anchor)
     if origin is not None:
-        return origin
+        return _lexical_normalize(origin)
     first = _first_symlink_component(anchor)
-    return first.parent if first is not None else anchor
+    if first is not None:
+        return _lexical_normalize(first.parent)
+    return _lexical_normalize(anchor)
 
 
 def _resolve_from(value: Any, base: Path) -> Optional[Path]:
