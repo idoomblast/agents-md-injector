@@ -1,6 +1,6 @@
 [project]
 name = "agents-md-injector"
-version = "1.2.16"
+version = "1.2.17"
 description = "Hermes Agent plugin that injects the nearest AGENTS.md into file-oriented tool results."
 requires-python = ">=3.9"
 

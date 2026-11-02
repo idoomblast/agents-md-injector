@@ -402,6 +402,48 @@ def test_search_result_in_other_repo_is_not_injected(injector, tmp_path):
     assert key not in injector._last_seen
 
 
+def test_symlinked_external_result_into_anchor_is_not_injected(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "app.py").write_text("app", encoding="utf-8")
+    other = tmp_path / "other_repo"
+    other.mkdir()
+    (other / ".git").mkdir()
+    (other / "AGENTS.md").write_text("other rules", encoding="utf-8")
+    (other / "linked").symlink_to(repo, target_is_directory=True)
+    result = json.dumps({"matches": [{"path": str(other / "linked" / "app.py")}]})
+
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is None or "other rules" not in output
+    key = str((other / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
+
+
+def test_external_results_do_not_consume_refinement_cap(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    external_one = tmp_path / "external_one"
+    external_one.mkdir()
+    (external_one / "app.py").write_text("one", encoding="utf-8")
+    external_two = tmp_path / "external_two"
+    external_two.mkdir()
+    (external_two / "app.py").write_text("two", encoding="utf-8")
+    result = json.dumps(
+        {
+            "matches": [
+                {"path": str(external_one / "app.py")},
+                {"path": str(external_two / "app.py")},
+                {"path": str(repo / "src" / "app.py")},
+            ]
+        }
+    )
+    monkeypatch.setenv(injector.MAX_SEARCH_DIRS_ENV, "2")
+
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is not None and "repo rules" in output
+
+
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     (repo / "src" / "AGENTS.md").write_text("src rules", encoding="utf-8")

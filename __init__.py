@@ -350,6 +350,11 @@ def _find_origin_git_root(start: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _within_trust(path: Path, trust: Path) -> bool:
+    """True only when both the lexical path and its resolution stay in trust."""
+    return _is_within_lexical(path, trust) and _is_inside(path, trust)
+
+
 def _anchor_trust_root(anchor: Path) -> Path:
     """Return the lexical trust boundary for a search anchor."""
     origin = _find_origin_git_root(anchor)
@@ -698,18 +703,15 @@ def _on_transform_tool_result(
                 anchor = anchor.parent
             if not anchor.is_dir():
                 return None
+            anchor_trust = _anchor_trust_root(anchor)
             refined = _search_result_directories(
                 result,
                 anchor,
                 working_dir,
                 _env_count(MAX_SEARCH_DIRS_ENV, DEFAULT_MAX_SEARCH_DIRS),
+                trust_root=anchor_trust,
             )
-            anchor_trust = _anchor_trust_root(anchor)
-            targets.extend(
-                (directory, True)
-                for directory in refined
-                if _is_inside(directory, anchor_trust)
-            )
+            targets.extend((directory, True) for directory in refined)
         chunks: List[str] = []
         if tool_name == "search_files":
             for path in _search_result_paths(result, anchor, working_dir):
@@ -717,12 +719,12 @@ def _on_transform_tool_result(
                     continue
                 if _core_should_skip(path.parent, working_dir):
                     continue
+                trust_root = _anchor_trust_root(anchor)
+                if not _within_trust(path, trust_root):
+                    continue
                 try:
                     resolved = path.resolve()
                 except OSError:
-                    continue
-                trust_root = _anchor_trust_root(anchor)
-                if not _is_inside(resolved, trust_root):
                     continue
                 if _read_blocked(resolved):
                     continue
@@ -769,6 +771,7 @@ def _search_result_directories(
     anchor: Path,
     working_dir: Path,
     limit: int,
+    trust_root: Optional[Path] = None,
 ) -> List[Path]:
     """Best-effort extraction of match parents, falling back to the search anchor."""
     if limit == 0:
@@ -781,6 +784,8 @@ def _search_result_directories(
     directories: List[Path] = []
     seen: Set[str] = set()
     for path in paths:
+        if trust_root is not None and not _within_trust(path, trust_root):
+            continue
         directory = path if path.is_dir() else path.parent
         try:
             identity = str(directory.resolve())
