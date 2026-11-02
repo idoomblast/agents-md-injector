@@ -245,3 +245,51 @@ def test_out_of_tree_symlink_search_result_is_not_cached(injector, tmp_path, mon
     key = str(outside.resolve())
     assert all(key not in paths for paths in injector._injected.values())
     assert key not in injector._last_seen
+
+
+def test_parent_symlink_search_result_is_not_read(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "AGENTS.md").write_text("outside rules", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+    result = json.dumps({"matches": [{"path": str(repo / "linked" / "AGENTS.md")}]})
+
+    reads = []
+    original = injector._read_text_limited
+
+    def spy(path, limit):
+        reads.append(str(path))
+        return original(path, limit)
+
+    monkeypatch.setattr(injector, "_read_text_limited", spy)
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is None or "outside rules" not in output
+    external = str((outside / "AGENTS.md").resolve())
+    assert external not in reads
+    assert all(external not in paths for paths in injector._injected.values())
+    assert external not in injector._last_seen
+
+
+def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    (repo / "src" / "AGENTS.md").write_text("src rules", encoding="utf-8")
+    (repo / "other").mkdir()
+    (repo / "other" / "AGENTS.md").write_text("other rules", encoding="utf-8")
+    (repo / "other" / "app.py").write_text("other app", encoding="utf-8")
+    result = json.dumps(
+        {
+            "matches": [
+                {"path": str(repo / "src" / "app.py")},
+                {"path": str(repo / "src" / ".." / "src" / "app.py")},
+                {"path": str(repo / "other" / "app.py")},
+            ]
+        }
+    )
+    monkeypatch.setenv(injector.MAX_SEARCH_DIRS_ENV, "2")
+
+    output = hook(injector, "search_files", {"path": str(repo)}, result)
+
+    assert output is not None
+    assert "other rules" in output

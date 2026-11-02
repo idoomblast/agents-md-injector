@@ -294,6 +294,24 @@ def _lexical_from(value: Any, base: Path) -> Optional[Path]:
         return None
 
 
+def _has_symlink_component(path: Path, stop: Path) -> bool:
+    """True when *path* or one of its parents up to *stop* is a symlink."""
+    try:
+        stop = stop.resolve()
+    except OSError:
+        return True
+    current = path
+    while True:
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            return True
+        if current == stop or current.parent == current:
+            return False
+        current = current.parent
+
+
 def _resolve_from(value: Any, base: Path) -> Optional[Path]:
     try:
         text = os.fspath(value)
@@ -459,10 +477,18 @@ def collect_instruction_chunks(
             if not _reserve(cache, key):
                 continue
 
-            # A symlinked instruction file may point outside the tree it sits
-            # in (e.g. at ~/.aws/credentials). Only trust links that stay
-            # inside the repository, and refuse known-sensitive targets.
-            if candidate.is_symlink() and not _is_inside(resolved, git_root or start):
+            # A symlinked instruction file (or a symlinked parent directory)
+            # may point outside the tree it sits in (e.g. at ~/.aws/credentials).
+            # Inside a repository, every resolved target must stay in that
+            # repository. Without a repository, only a path with a symlink
+            # component must stay inside the starting directory; the normal
+            # walk-up to ancestor instruction files is preserved.
+            if git_root is not None:
+                if not _is_inside(resolved, git_root):
+                    logger.debug("Ignoring out-of-tree instruction target %s -> %s", candidate, resolved)
+                    _release(cache, key)
+                    continue
+            elif _has_symlink_component(candidate, start) and not _is_inside(resolved, start):
                 logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
                 _release(cache, key)
                 continue
@@ -635,9 +661,7 @@ def _on_transform_tool_result(
                     resolved = path.resolve()
                 except OSError:
                     continue
-                if path.is_symlink() and not _is_inside(
-                    resolved, find_git_root(path.parent) or path.parent
-                ):
+                if not _is_inside(resolved, find_git_root(path.parent) or anchor):
                     continue
                 if _read_blocked(resolved):
                     continue
@@ -697,9 +721,12 @@ def _search_result_directories(
     seen: Set[str] = set()
     for path in paths:
         directory = path if path.is_dir() else path.parent
-        key = str(directory)
-        if key not in seen:
-            seen.add(key)
+        try:
+            identity = str(directory.resolve())
+        except OSError:
+            identity = str(directory)
+        if identity not in seen:
+            seen.add(identity)
             directories.append(directory)
             if len(directories) >= limit:
                 break
