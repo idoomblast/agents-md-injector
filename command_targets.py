@@ -162,6 +162,65 @@ def _is_heredoc_terminator(line: str, delimiter: str, strip_tabs: bool) -> bool:
     return candidate == delimiter
 
 
+def _continuation_tail(line: str) -> bool:
+    """True when *line* ends in an unquoted shell backslash-newline."""
+    trailing = len(line) - len(line.rstrip("\\"))
+    if trailing % 2 == 0:
+        return False
+    prefix = line[:-trailing]
+    quote = ""
+    index = 0
+    while index < len(prefix):
+        char = prefix[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+        elif quote == '"':
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                quote = ""
+        else:
+            if char == "\\":
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                quote = char
+        index += 1
+    return quote != "'"
+
+
+def _join_continuations(command: str) -> str:
+    """Join shell backslash-newline continuations before heredoc parsing.
+
+    Continuations are removed in command text (including double quotes and a
+    split heredoc operator/delimiter), but heredoc bodies are copied verbatim
+    so their data cannot become commands.
+    """
+    lines = command.split("\n")
+    kept: List[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        while _continuation_tail(line) and index + 1 < len(lines):
+            line = line[:-1] + lines[index + 1]
+            index += 1
+        kept.append(line)
+        delimiters = _heredoc_delimiters(line)
+        index += 1
+        for delimiter, strip_tabs in delimiters:
+            while index < len(lines) and not _is_heredoc_terminator(
+                lines[index], delimiter, strip_tabs
+            ):
+                kept.append(lines[index])
+                index += 1
+            if index < len(lines):
+                kept.append(lines[index])
+                index += 1
+    return "\n".join(kept)
+
+
 def _strip_heredocs(command: str) -> str:
     """Remove heredoc bodies so feed content is never parsed as argv.
 
@@ -723,7 +782,9 @@ def extract_terminal_targets(
     )
     try:
         tokens = _shell_tokens(
-            _normalize_heredoc_dash(_normalize_newlines(_strip_heredocs(command)))
+            _normalize_heredoc_dash(
+                _normalize_newlines(_strip_heredocs(_join_continuations(command)))
+            )
         )
     except (ValueError, OSError):
         return []

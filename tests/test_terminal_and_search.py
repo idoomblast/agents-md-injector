@@ -3,6 +3,8 @@
 import json
 import threading
 
+import pytest
+
 
 def make_repo(root, *, instructions=True):
     repo = root / "repo"
@@ -614,7 +616,10 @@ def test_here_string_escaped_quote_does_not_hide_heredoc(injector, tmp_path):
         assert output is None or "repo rules" not in output
 
 
-def test_committed_delivery_survives_owner_rollback(injector, tmp_path, monkeypatch):
+@pytest.mark.parametrize("session", ["s1", ""])
+def test_committed_delivery_survives_owner_rollback(
+    injector, tmp_path, monkeypatch, session
+):
     repo = make_repo(tmp_path)
     bad = tmp_path / "bad"
     bad.mkdir()
@@ -641,7 +646,7 @@ def test_committed_delivery_survives_owner_rollback(injector, tmp_path, monkeypa
             "terminal",
             {"command": f"cat {repo / 'src' / 'app.py'} {bad / 'x.py'}"},
             "raw",
-            session="s1",
+            session=session,
         )
 
     worker = threading.Thread(target=owner)
@@ -653,7 +658,7 @@ def test_committed_delivery_survives_owner_rollback(injector, tmp_path, monkeypa
         "search_files",
         {"path": str(repo)},
         json.dumps({"matches": [{"path": str(repo / "AGENTS.md")}]}),
-        session="s1",
+        session=session,
     )
     assert consumer is None or "repo rules" not in consumer
     release.set()
@@ -666,7 +671,7 @@ def test_committed_delivery_survives_owner_rollback(injector, tmp_path, monkeypa
         "read_file",
         {"path": str(repo / "src" / "app.py")},
         "raw",
-        session="s1",
+        session=session,
     )
     assert retry is None or "repo rules" not in retry
 
@@ -686,6 +691,238 @@ def test_core_coordination_uses_normalized_ancestry(injector, tmp_path, monkeypa
         injector,
         "read_file",
         {"path": str(repo / "area" / "nested" / ".." / "app.py")},
+        "raw",
+    )
+
+    assert output is None or "repo rules" not in output
+
+
+def test_pending_empty_self_read_is_not_committed(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("", encoding="utf-8")
+    original = injector._read_text_limited
+    paused = threading.Event()
+    release = threading.Event()
+
+    def gated(path, limit):
+        if str(path).endswith("repo/AGENTS.md") and not paused.is_set():
+            paused.set()
+            assert release.wait(5)
+        return original(path, limit)
+
+    monkeypatch.setattr(injector, "_read_text_limited", gated)
+    result: dict[str, object] = {}
+
+    def owner():
+        result["value"] = hook(
+            injector,
+            "read_file",
+            {"path": str(repo / "src" / "app.py")},
+            "raw",
+            session="empty",
+        )
+
+    worker = threading.Thread(target=owner)
+    worker.start()
+    assert paused.wait(5)
+    assert (
+        hook(
+            injector,
+            "read_file",
+            {"path": str(repo / "AGENTS.md")},
+            "raw",
+            session="empty",
+        )
+        is None
+    )
+    release.set()
+    worker.join(5)
+    assert result.get("value") is None
+
+    (repo / "AGENTS.md").write_text("later rules", encoding="utf-8")
+    retry = hook(
+        injector,
+        "read_file",
+        {"path": str(repo / "src" / "app.py")},
+        "raw",
+        session="empty",
+    )
+    assert retry is not None and "later rules" in retry
+
+
+def test_pending_sensitive_self_read_is_not_committed(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    sensitive = repo / ".ssh"
+    sensitive.mkdir()
+    (sensitive / "x.py").write_text("x", encoding="utf-8")
+    (sensitive / "AGENTS.md").write_text("secret", encoding="utf-8")
+    original_blocked = injector._read_blocked
+    paused = threading.Event()
+    release = threading.Event()
+
+    def gated_blocked(path):
+        if str(path).endswith(".ssh/AGENTS.md") and not paused.is_set():
+            paused.set()
+            assert release.wait(5)
+        return original_blocked(path)
+
+    monkeypatch.setattr(injector, "_read_blocked", gated_blocked)
+    result: dict[str, object] = {}
+
+    def owner():
+        result["value"] = hook(
+            injector,
+            "read_file",
+            {"path": str(sensitive / "x.py")},
+            "raw",
+            session="sensitive",
+        )
+
+    worker = threading.Thread(target=owner)
+    worker.start()
+    assert paused.wait(5)
+    output = hook(
+        injector,
+        "read_file",
+        {"path": str(sensitive / "AGENTS.md")},
+        "raw",
+        session="sensitive",
+    )
+    assert output is None or "secret" not in output
+    release.set()
+    worker.join(5)
+    assert result.get("value") is None
+    key = str((sensitive / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert all(key not in paths for paths in injector._committed.values())
+
+
+def test_late_commit_restores_key_after_owner_rollback(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "x.py").write_text("x", encoding="utf-8")
+    (bad / "AGENTS.md").write_text("bad rules", encoding="utf-8")
+    original_read = injector._read_text_limited
+    original_commit = injector._commit
+    read_paused = threading.Event()
+    read_release = threading.Event()
+    commit_paused = threading.Event()
+    commit_release = threading.Event()
+
+    def gated_read(path, limit):
+        if "bad" in str(path):
+            raise UnicodeEncodeError("utf-8", str(path), 0, 1, "bad path")
+        if str(path).endswith("repo/AGENTS.md") and not read_paused.is_set():
+            read_paused.set()
+            assert read_release.wait(5)
+        return original_read(path, limit)
+
+    def gated_commit(session_key, keys, cache):
+        commit_paused.set()
+        assert commit_release.wait(5)
+        return original_commit(session_key, keys, cache)
+
+    monkeypatch.setattr(injector, "_read_text_limited", gated_read)
+    monkeypatch.setattr(injector, "_commit", gated_commit)
+    owner_result: dict[str, object] = {}
+    consumer_result: dict[str, object] = {}
+
+    def owner():
+        owner_result["value"] = hook(
+            injector,
+            "terminal",
+            {"command": f"cat {repo / 'src' / 'app.py'} {bad / 'x.py'}"},
+            "raw",
+            session="late",
+        )
+
+    def consumer():
+        consumer_result["value"] = hook(
+            injector,
+            "read_file",
+            {"path": str(repo / "AGENTS.md")},
+            "raw",
+            session="late",
+        )
+
+    owner_thread = threading.Thread(target=owner)
+    owner_thread.start()
+    assert read_paused.wait(5)
+    consumer_thread = threading.Thread(target=consumer)
+    consumer_thread.start()
+    assert commit_paused.wait(5)
+
+    read_release.set()
+    owner_thread.join(5)
+    assert owner_result.get("value") is None
+    commit_release.set()
+    consumer_thread.join(5)
+
+    retry = hook(
+        injector,
+        "read_file",
+        {"path": str(repo / "src" / "app.py")},
+        "raw",
+        session="late",
+    )
+    assert retry is None or "repo rules" not in retry
+
+
+def test_backslash_newline_continuations(injector, tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+
+    for index, command in enumerate(
+        (
+            f"cat <<\\\nEOF\ncat {repo / 'src' / 'app.py'}\nEOF",
+            f"cat <<EO\\\nF\ncat {repo / 'src' / 'app.py'}\nEOF",
+        )
+    ):
+        output = hook(
+            injector,
+            "terminal",
+            {"command": command},
+            "raw",
+            session=f"continued-heredoc-{index}",
+        )
+        assert output is None or "repo rules" not in output
+
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    quoted = hook(
+        injector,
+        "terminal",
+        {"command": f'cat "{repo / "src" / "ap"}\\\n{"p.py"}"'},
+        "raw",
+        session="continued-quoted",
+    )
+    assert quoted is not None and "repo rules" in quoted
+
+    following = hook(
+        injector,
+        "terminal",
+        {"command": f"cat <<EOF\nbody\nEOF\ncat {repo / 'src' / 'app.py'}"},
+        "raw",
+        session="continued-following",
+    )
+    assert following is not None and "repo rules" in following
+
+
+def test_core_coordination_accepts_symlinked_working_directory(
+    injector, tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("repo rules", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("app", encoding="utf-8")
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    monkeypatch.setenv("TERMINAL_CWD", str(alias))
+
+    output = hook(
+        injector,
+        "read_file",
+        {"path": "src/app.py"},
         "raw",
     )
 

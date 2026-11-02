@@ -214,7 +214,7 @@ def _release(
 ) -> None:
     """Give a reservation back, unless a concurrent call already delivered it."""
     with _injected_lock:
-        if session_key and key in _committed.get(session_key, set()):
+        if key in _committed.get(session_key, set()):
             keep = True
         else:
             cache.discard(key)
@@ -225,10 +225,13 @@ def _release(
         logger.debug("Keeping committed instruction claim for %s", key)
 
 
-def _commit(session_key: str, keys: Iterable[str]) -> None:
-    """Mark *keys* as delivered so rollback cannot remove their dedupe state."""
+def _commit(session_key: str, keys: Iterable[str], cache: Set[str]) -> None:
+    """Atomically establish dedupe membership and committed state for *keys*."""
     with _injected_lock:
+        live = _injected.setdefault(session_key, cache)
+        live.update(keys)
         _committed.setdefault(session_key, set()).update(keys)
+        _last_seen[session_key] = time.monotonic()
 
 
 def _note(log: Optional[List[str]], key: str) -> None:
@@ -326,10 +329,12 @@ def _core_should_skip(target_dir: Path, working_dir: Path) -> bool:
         return False
     target_dir = _lexical_normalize(target_dir)
     repo_root = find_git_root(target_dir)
-    return (
-        repo_root is not None
-        and _lexical_normalize(repo_root) == _lexical_normalize(working_dir.resolve())
-    )
+    if repo_root is None:
+        return False
+    try:
+        return repo_root.resolve() == working_dir.resolve()
+    except OSError:
+        return False
 
 
 def _lexical_from(value: Any, base: Path) -> Optional[Path]:
@@ -595,10 +600,10 @@ def collect_instruction_chunks(
             key = str(resolved)
             if total_budget and used >= total_budget:
                 return chunks
-            if not _reserve(cache, key, claim_log):
-                if commit_log is not None and resolved == path.resolve():
-                    _note(commit_log, key)
-                continue
+            owned = _reserve(cache, key, claim_log)
+            if not owned:
+                if resolved != path.resolve():
+                    continue
 
             # A symlinked instruction file (or a symlinked parent directory)
             # may point outside the tree it sits in (e.g. at ~/.aws/credentials).
@@ -609,18 +614,21 @@ def collect_instruction_chunks(
             if git_root is not None:
                 if not _is_inside(resolved, git_root):
                     logger.debug("Ignoring out-of-tree instruction target %s -> %s", candidate, resolved)
-                    _release(cache, key, claim_log, session_key)
+                    if owned:
+                        _release(cache, key, claim_log, session_key)
                     continue
             elif _has_symlink_component(candidate, start):
                 first = _first_symlink_component(start)
                 boundary = first.parent if first is not None else start
                 if not _is_inside(resolved, boundary):
                     logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
-                    _release(cache, key, claim_log, session_key)
+                    if owned:
+                        _release(cache, key, claim_log, session_key)
                     continue
             if _read_blocked(resolved):
                 logger.debug("Ignoring sensitive instruction target %s", resolved)
-                _release(cache, key, claim_log, session_key)
+                if owned:
+                    _release(cache, key, claim_log, session_key)
                 continue
 
             limit = per_file
@@ -631,19 +639,21 @@ def collect_instruction_chunks(
                 content, omitted = _read_text_limited(resolved, limit)
             except OSError as exc:
                 logger.debug("Could not read %s: %s", resolved, exc)
-                _release(cache, key, claim_log, session_key)
+                if owned:
+                    _release(cache, key, claim_log, session_key)
                 continue
 
             if not content:
                 # Nothing to inject: release the reservation so a later call
                 # can inject once the file actually has instructions.
-                _release(cache, key, claim_log, session_key)
+                if owned:
+                    _release(cache, key, claim_log, session_key)
                 continue
 
             # Reading the instruction file itself: its content is already the
-            # tool result, so keep it reserved and move on. Only do this when
-            # the file actually has content; an empty self-read is released
-            # above so a later call can inject it once populated.
+            # tool result, so keep it reserved and move on. Only commit an
+            # observed pending key after the target passed safety checks and
+            # actually has content.
             if resolved == path.resolve():
                 if commit_log is not None:
                     _note(commit_log, key)
@@ -839,7 +849,7 @@ def _on_transform_tool_result(
             total_used += sum(
                 len(chunk.encode("utf-8")) + SEPARATOR_BYTES for chunk in new_chunks
             )
-        _commit(session_key, [*claim_log, *commit_log])
+        _commit(session_key, [*claim_log, *commit_log], _session_cache(session_key))
     except Exception as exc:  # never break a tool call because of this plugin
         logger.debug("agents-md-injector failed for %s: %s", tool_name, exc)
         try:
