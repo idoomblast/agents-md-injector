@@ -337,6 +337,54 @@ def test_symlinked_search_anchor_is_not_injected(injector, tmp_path):
     assert key not in injector._last_seen
 
 
+def test_nonempty_result_through_symlinked_anchor_is_not_injected(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / "AGENTS.md").write_text("outside rules", encoding="utf-8")
+    (outside / "app.py").write_text("app", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+    result = json.dumps({"matches": [{"path": str(repo / "linked" / "app.py")}]})
+
+    output = hook(
+        injector,
+        "search_files",
+        {"path": str(repo / "linked")},
+        result,
+    )
+
+    assert output is None or "outside rules" not in output
+    key = str((outside / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
+
+
+def test_symlinked_search_anchor_without_git_is_not_injected(injector, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".git").mkdir()
+    (outside / "AGENTS.md").write_text("outside rules", encoding="utf-8")
+    (outside / "app.py").write_text("app", encoding="utf-8")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+    result = json.dumps({"matches": [{"path": str(repo / "linked" / "app.py")}]})
+
+    output = hook(
+        injector,
+        "search_files",
+        {"path": str(repo / "linked")},
+        result,
+    )
+
+    assert output is None or "outside rules" not in output
+    key = str((outside / "AGENTS.md").resolve())
+    assert all(key not in paths for paths in injector._injected.values())
+    assert key not in injector._last_seen
+
+
 def test_alias_search_dirs_do_not_consume_cap(injector, tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     (repo / "src" / "AGENTS.md").write_text("src rules", encoding="utf-8")

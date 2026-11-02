@@ -526,10 +526,13 @@ def collect_instruction_chunks(
                     logger.debug("Ignoring out-of-tree instruction target %s -> %s", candidate, resolved)
                     _release(cache, key)
                     continue
-            elif _has_symlink_component(candidate, start) and not _is_inside(resolved, start):
-                logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
-                _release(cache, key)
-                continue
+            elif _has_symlink_component(candidate, start):
+                first = _first_symlink_component(start)
+                boundary = first.parent if first is not None else start
+                if not _is_inside(resolved, boundary):
+                    logger.debug("Ignoring out-of-tree instruction symlink %s -> %s", candidate, resolved)
+                    _release(cache, key)
+                    continue
             if _read_blocked(resolved):
                 logger.debug("Ignoring sensitive instruction target %s", resolved)
                 _release(cache, key)
@@ -704,7 +707,11 @@ def _on_transform_tool_result(
                     resolved = path.resolve()
                 except OSError:
                     continue
-                if not _is_inside(resolved, _find_origin_git_root(path.parent) or anchor):
+                trust_root = _find_origin_git_root(path.parent)
+                if trust_root is None:
+                    first = _first_symlink_component(anchor)
+                    trust_root = first.parent if first is not None else anchor
+                if not _is_inside(resolved, trust_root):
                     continue
                 if _read_blocked(resolved):
                     continue
