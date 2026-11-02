@@ -27,7 +27,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.21 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.2.22 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -131,6 +131,14 @@ ends with a visible marker so the model knows content was cut:
    `.ssh`/`.aws`/`.kube`)
    refuses sensitive targets even when Hermes' read guard is unavailable, and the guard is
    consulted for everything else.
+10. **Shell-aware terminal parsing.** Backslash-newline continuations are removed outside
+    single quotes (including inside double quotes and across a heredoc operator or delimiter);
+    quoted newlines stay content, and quote state carries across physical lines. Heredoc
+    bodies are never tokenized as commands: with an unquoted delimiter, backslash-newline is
+    removed before terminator matching (so `EO\` + `F` terminates and `body\` + `EOF` does
+    not); with a quoted delimiter the body is literal and physical terminator lines are
+    compared exactly. `<<-` strips leading tabs, `<<<` is a here-string, and newline-separated
+    commands remain separate. Arbitrary Bash grammar outside these forms is not interpreted.
 
 ### Coordination with Hermes core hints
 

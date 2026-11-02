@@ -59,12 +59,15 @@ def _unquote_fragment(text: str, quote: str) -> str:
     return "".join(result)
 
 
-def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
-    """Return ``(delimiter, strip_tabs)`` for each heredoc on *line*.
+def _heredoc_delimiters(line: str) -> List[Tuple[str, bool, bool]]:
+    """Return ``(delimiter, strip_tabs, quoted)`` for each heredoc on *line*.
 
-    Markers inside quotes are literals, not heredocs.
+    Markers inside quotes are literals, not heredocs. ``quoted`` follows the
+    shell rule: any quoted or backslash-escaped character in the delimiter
+    word disables expansion (and therefore backslash-newline removal) in the
+    body.
     """
-    delimiters: List[Tuple[str, bool]] = []
+    delimiters: List[Tuple[str, bool, bool]] = []
     index = 0
     quote = ""
     while index < len(line):
@@ -126,11 +129,13 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
                 index = cursor
                 continue
             parts: List[str] = []
+            quoted = False
             while cursor < len(line):
                 current = line[cursor]
                 if current.isspace() or current in ";|&<>()":
                     break
                 if current in {"'", '"'}:
+                    quoted = True
                     closing = _find_closing_quote(line, cursor + 1, current)
                     if closing == -1:
                         parts.append(_unquote_fragment(line[cursor + 1:], current))
@@ -140,6 +145,7 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
                     cursor = closing + 1
                     continue
                 if current == "\\":
+                    quoted = True
                     if cursor + 1 < len(line):
                         parts.append(line[cursor + 1])
                         cursor += 2
@@ -149,100 +155,122 @@ def _heredoc_delimiters(line: str) -> List[Tuple[str, bool]]:
                 parts.append(current)
                 cursor += 1
             if parts:
-                delimiters.append(("".join(parts), strip_tabs))
+                delimiters.append(("".join(parts), strip_tabs, quoted))
             index = cursor
             continue
         index += 1
     return delimiters
 
 
-def _is_heredoc_terminator(line: str, delimiter: str, strip_tabs: bool) -> bool:
-    """Shell rule: ``<<`` needs an exact line; ``<<-`` strips leading tabs only."""
-    candidate = line.lstrip("\t") if strip_tabs else line
-    return candidate == delimiter
+def _read_physical_line(text: str, index: int) -> Tuple[str, int]:
+    """Return ``(line_without_newline, index_after_newline)``."""
+    newline = text.find("\n", index)
+    if newline == -1:
+        return text[index:], len(text)
+    return text[index:newline], newline + 1
 
 
-def _continuation_tail(line: str) -> bool:
-    """True when *line* ends in an unquoted shell backslash-newline."""
-    trailing = len(line) - len(line.rstrip("\\"))
-    if trailing % 2 == 0:
-        return False
-    prefix = line[:-trailing]
+def _trailing_backslashes(line: str) -> int:
+    return len(line) - len(line.rstrip("\\"))
+
+
+def _consume_heredoc_body(
+    text: str, start: int, delimiter: str, strip_tabs: bool, quoted: bool
+) -> int:
+    """Skip a heredoc body and return the index just past its terminator.
+
+    Quoted delimiters keep the body literal: physical lines are compared with
+    the delimiter exactly (tabs stripped for ``<<-``). Unquoted heredocs remove
+    backslash-newline before the terminator comparison, so a body line ending
+    in an odd number of backslashes is joined with the following line first.
+    """
+    position = start
+    while position < len(text):
+        line, next_position = _read_physical_line(text, position)
+        if quoted:
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                return next_position
+            position = next_position
+            continue
+
+        logical = line
+        while _trailing_backslashes(logical) % 2 == 1 and next_position < len(text):
+            following, after = _read_physical_line(text, next_position)
+            logical = logical[:-1] + following
+            next_position = after
+        candidate = logical.lstrip("\t") if strip_tabs else logical
+        if candidate == delimiter:
+            return next_position
+        position = next_position
+    return len(text)
+
+
+def _preprocess_shell(command: str) -> str:
+    """Normalize shell continuations, quote spans, and heredoc bodies.
+
+    A single character-level pass carries quote state across physical lines
+    (quoted newlines are content), removes unquoted/double-quoted
+    backslash-newline continuations, and swallows every heredoc body before it
+    can be tokenized as a command. Unquoted bodies remove backslash-newline
+    before terminator matching, as Bash does.
+    """
+    out: List[str] = []
+    buffer: List[str] = []
     quote = ""
     index = 0
-    while index < len(prefix):
-        char = prefix[index]
+    while index < len(command):
+        char = command[index]
         if quote == "'":
+            buffer.append(char)
             if char == "'":
                 quote = ""
-        elif quote == '"':
-            if char == "\\":
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\" and index + 1 < len(command):
+                following = command[index + 1]
+                if following == "\n":
+                    index += 2
+                    continue
+                buffer.append(char)
+                buffer.append(following)
                 index += 2
                 continue
+            buffer.append(char)
             if char == '"':
                 quote = ""
-        else:
-            if char == "\\":
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(command):
+            following = command[index + 1]
+            if following == "\n":
                 index += 2
                 continue
-            if char in {"'", '"'}:
-                quote = char
-        index += 1
-    return quote != "'"
-
-
-def _join_continuations(command: str) -> str:
-    """Join shell backslash-newline continuations before heredoc parsing.
-
-    Continuations are removed in command text (including double quotes and a
-    split heredoc operator/delimiter), but heredoc bodies are copied verbatim
-    so their data cannot become commands.
-    """
-    lines = command.split("\n")
-    kept: List[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        while _continuation_tail(line) and index + 1 < len(lines):
-            line = line[:-1] + lines[index + 1]
+            buffer.append(char)
+            buffer.append(following)
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            buffer.append(char)
             index += 1
-        kept.append(line)
-        delimiters = _heredoc_delimiters(line)
+            continue
+        if char == "\n":
+            line = "".join(buffer)
+            buffer = []
+            out.append(line)
+            index += 1
+            for delimiter, strip_tabs, quoted in _heredoc_delimiters(line):
+                index = _consume_heredoc_body(
+                    command, index, delimiter, strip_tabs, quoted
+                )
+            continue
+        buffer.append(char)
         index += 1
-        for delimiter, strip_tabs in delimiters:
-            while index < len(lines) and not _is_heredoc_terminator(
-                lines[index], delimiter, strip_tabs
-            ):
-                kept.append(lines[index])
-                index += 1
-            if index < len(lines):
-                kept.append(lines[index])
-                index += 1
-    return "\n".join(kept)
-
-
-def _strip_heredocs(command: str) -> str:
-    """Remove heredoc bodies so feed content is never parsed as argv.
-
-    Only the marker line survives (it is a redirection the tokenizer drops).
-    Handles several heredocs per line and ignores quoted markers.
-    """
-    lines = command.splitlines()
-    kept: List[str] = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        kept.append(line)
-        delimiters = _heredoc_delimiters(line)
-        index += 1
-        for delimiter, strip_tabs in delimiters:
-            while index < len(lines) and not _is_heredoc_terminator(
-                lines[index], delimiter, strip_tabs
-            ):
-                index += 1
-            if index < len(lines):
-                index += 1  # drop the delimiter line too
-    return "\n".join(kept)
+    if buffer:
+        out.append("".join(buffer))
+    return "\n".join(out)
 
 
 _HEREDOC_DASH = "\x00"
@@ -783,7 +811,7 @@ def extract_terminal_targets(
     try:
         tokens = _shell_tokens(
             _normalize_heredoc_dash(
-                _normalize_newlines(_strip_heredocs(_join_continuations(command)))
+                _normalize_newlines(_preprocess_shell(command))
             )
         )
     except (ValueError, OSError):

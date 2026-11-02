@@ -818,10 +818,10 @@ def test_late_commit_restores_key_after_owner_rollback(injector, tmp_path, monke
             assert read_release.wait(5)
         return original_read(path, limit)
 
-    def gated_commit(session_key, keys, cache):
+    def gated_commit(*args):
         commit_paused.set()
         assert commit_release.wait(5)
-        return original_commit(session_key, keys, cache)
+        return original_commit(*args)
 
     monkeypatch.setattr(injector, "_read_text_limited", gated_read)
     monkeypatch.setattr(injector, "_commit", gated_commit)
@@ -905,6 +905,81 @@ def test_backslash_newline_continuations(injector, tmp_path, monkeypatch):
         session="continued-following",
     )
     assert following is not None and "repo rules" in following
+
+
+def test_unquoted_heredoc_continuations_follow_bash(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    target = repo / "src" / "app.py"
+
+    for index, operator in enumerate(("<<EOF", "<< EOF", "<<-EOF")):
+        false_positive = (
+            f"cat {operator}\nbody\\\nEOF\ncat {target}\nEOF"
+        )
+        output = hook(
+            injector,
+            "terminal",
+            {"command": false_positive},
+            "raw",
+            session=f"unquoted-heredoc-fp-{index}",
+        )
+        assert output is None or "repo rules" not in output
+
+        false_negative = f"cat {operator}\nEO\\\nF\ncat {target}"
+        output = hook(
+            injector,
+            "terminal",
+            {"command": false_negative},
+            "raw",
+            session=f"unquoted-heredoc-fn-{index}",
+        )
+        assert output is not None and "repo rules" in output
+
+    quoted_positive = f"cat <<'EOF'\nbody\\\nEOF\ncat {target}\nEOF"
+    output = hook(
+        injector,
+        "terminal",
+        {"command": quoted_positive},
+        "raw",
+        session="quoted-heredoc-control-positive",
+    )
+    assert output is not None and "repo rules" in output
+
+    quoted_negative = f"cat <<'EOF'\nEO\\\nF\ncat {target}"
+    output = hook(
+        injector,
+        "terminal",
+        {"command": quoted_negative},
+        "raw",
+        session="quoted-heredoc-control-negative",
+    )
+    assert output is None or "repo rules" not in output
+
+
+def test_quoted_newlines_preserve_quote_state_across_lines(injector, tmp_path):
+    repo = make_repo(tmp_path)
+    single_name = "a\nb\\\nc"
+    single = repo / "src" / single_name
+    single.write_text("single", encoding="utf-8")
+    output = hook(
+        injector,
+        "terminal",
+        {"command": f"cat '{repo / 'src' / 'a'}\nb\\\nc'"},
+        "raw",
+        session="quoted-newline-single",
+    )
+    assert output is not None and "repo rules" in output
+
+    double_name = "a\nb'c"
+    double = repo / "src" / double_name
+    double.write_text("double", encoding="utf-8")
+    output = hook(
+        injector,
+        "terminal",
+        {"command": f'cat "{repo / "src" / "a"}\nb\'\\\nc"'},
+        "raw",
+        session="quoted-newline-double",
+    )
+    assert output is not None and "repo rules" in output
 
 
 def test_core_coordination_accepts_symlinked_working_directory(
