@@ -1,5 +1,5 @@
 name: agents-md-injector
-version: 1.2.22
+version: 1.3.0
 description: Inject the nearest AGENTS.md into read_file, search_files, and terminal file-read results — walk up to the git root, per-session dedupe, size-capped output, gateway-safe path resolution.
 author: idoomblast
 
