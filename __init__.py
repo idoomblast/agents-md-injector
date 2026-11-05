@@ -952,4 +952,10 @@ def _search_result_paths(result: Any, anchor: Path, working_dir: Path) -> List[P
 def register(ctx) -> None:
     """Plugin entry point — called once by the Hermes plugin loader."""
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
+    skills_dir = Path(__file__).parent / "skills"
+    if skills_dir.is_dir():
+        for child in sorted(skills_dir.iterdir()):
+            skill_md = child / "SKILL.md"
+            if child.is_dir() and skill_md.exists():
+                ctx.register_skill(child.name, skill_md)
     logger.info("AGENTS.md injector plugin registered")

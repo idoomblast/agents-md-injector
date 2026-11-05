@@ -325,6 +325,9 @@ def test_register_declares_transform_hook(injector):
         def register_hook(self, name, handler):
             registered.append((name, handler))
 
+        def register_skill(self, name, path):
+            pass
+
     injector.register(Ctx())
 
     assert registered == [("transform_tool_result", injector._on_transform_tool_result)]
