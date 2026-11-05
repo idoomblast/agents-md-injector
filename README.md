@@ -10,6 +10,9 @@ never touch. This plugin loads instructions **when and where they become relevan
 when the agent reads or searches files, the instruction files above those targets are appended to
 the result.
 
+The repository also bundles the `init-deep` skill — the generator that writes the hierarchical
+`AGENTS.md` files this plugin injects. See [Bundled skill](#bundled-skill-init-deep).
+
 ```
 terminal("head -n 40 app/Models/Downloaded.php")
         │
@@ -27,7 +30,7 @@ terminal("head -n 40 app/Models/Downloaded.php")
   model sees the command result + the rules for that part of the tree
 ```
 
-**Version:** 1.2.22 · **Tests:** `pytest` suite · **License:** MIT
+**Version:** 1.3.0 · **Tests:** `pytest` suite · **License:** MIT
 
 ---
 
@@ -156,6 +159,38 @@ string returned by any plugin**. If another enabled plugin also transforms these
 only one of them takes effect. Disable the other plugin (or extend this one) rather
 than expecting the outputs to merge.
 
+## Bundled skill: `init-deep`
+
+`skills/init-deep/SKILL.md` ships with the plugin. It generates a hierarchical `AGENTS.md` knowledge
+base: a root file with the full treatment plus complexity-scored subdirectory files that never repeat
+their parent. It also documents the constraints this plugin imposes on the generated files (per-file
+and total byte caps, nearest-first injection, do not put secrets in `AGENTS.md`).
+
+Registering the plugin exposes it as a namespaced, read-only plugin skill:
+
+```text
+skills_list()                                    # lists init-deep under the plugin namespace
+skill_view(name="agents-md-injector:init-deep")
+```
+
+Plugin skills are resolved through `skill_view`/`skills_list` only. They are **not** copied into
+`~/.hermes/skills/`, not listed in the system prompt's `<available_skills>`, and do not create an
+`/init-deep` slash command — so the agent has to be told the name before it can find it.
+
+Install the bundled skill into the real skills tree so it behaves like any other skill:
+
+```bash
+# all bundled skills, into $HERMES_HOME/skills/<category>/<name>
+./scripts/install-skills.sh
+
+# or just this one
+cp -a skills/init-deep ~/.hermes/skills/software-development/init-deep
+```
+
+The copy is the live skill (system prompt + `/init-deep`); the bundled `skills/init-deep/SKILL.md`
+stays the source of truth for distribution. Re-run the script after editing it — the two copies do
+not sync themselves.
+
 ## Development
 
 ```bash
@@ -212,11 +247,17 @@ agents-md-injector/
 ├── __init__.py          # hook + walk-up logic (no third-party imports)
 ├── pyproject.toml       # project metadata + pytest/ruff config
 ├── .github/workflows/   # CI: ruff + pytest on Python 3.9 / 3.12
+├── skills/
+│   └── init-deep/
+│       └── SKILL.md     # hierarchical AGENTS.md generator, registered at load
+├── scripts/
+│   └── install-skills.sh  # copy bundled skills into $HERMES_HOME/skills
 ├── tests/
 │   ├── conftest.py      # loads the plugin like the Hermes loader
 │   ├── test_injector.py # read_file behavior, dedupe, caps, path boundaries
 │   ├── test_command_targets.py # terminal shell classifier
 │   ├── test_terminal_and_search.py # terminal/search_files integration
+│   ├── test_skill_registration.py  # bundled skill reaches ctx.register_skill
 │   └── test_regressions_v1_2_1.py # acceptance-gate regressions (symlinks, heredoc, dedupe race)
 ├── README.md
 └── LICENSE
